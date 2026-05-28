@@ -284,7 +284,7 @@ export default function TaskDetailPage() {
     {
       title: '操作',
       key: 'action',
-      width: 100,
+      width: 120,
       render: (_: any, record: DeliverableItem) => (
         <Space>
           <Button
@@ -292,11 +292,22 @@ export default function TaskDetailPage() {
             size="small"
             icon={<DownloadOutlined />}
             onClick={() => {
-              router.push(`/tasks/${taskId}/report`);
+              window.open(`/api/deliverables/${record.id}/download`, '_blank');
             }}
           >
-            查看
+            下载
           </Button>
+          {record.type === 'report' && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => {
+                router.push(`/tasks/${taskId}/report`);
+              }}
+            >
+              查看
+            </Button>
+          )}
         </Space>
       ),
     },
