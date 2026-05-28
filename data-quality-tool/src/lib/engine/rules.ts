@@ -230,9 +230,11 @@ export const crossField: RuleExecutor = (ctx) => {
   return issues;
 };
 
-/** 跨表关联校验 (简化: 检查外键是否存在) */
+/** 跨表关联校验 (外键引用检查) */
+/** 注: 实际逻辑在 executor.ts 中由 executeCrossTableRule 处理 */
+/** 此处保留占位实现，供 EXECUTOR_MAP 使用 */
 export const crossTable: RuleExecutor = (ctx) => {
-  // cross_table needs data from another sheet, handled at orchestrator level
-  // This executor is a placeholder; the orchestrator handles it specially
+  // 跨表校验需要参考表数据，由 orchestrator 统一构建引用集合后逐批次执行
+  // 此处的独立执行器仅处理同一 sheet 内的简单交叉引用
   return [];
 };

@@ -52,6 +52,85 @@ function chunkRows(rows: Record<string, unknown>[], batchSize: number): Record<s
 }
 
 /**
+ * 跨表校验: 检查某 sheet 某字段的值是否在另一 sheet 的参考字段中存在。
+ */
+function executeCrossTableRule(
+  rule: ParsedRule,
+  sheetName: string,
+  chunk: Record<string, unknown>[],
+  chunkStartIndex: number,
+  refSets: Map<string, Set<string>>,
+): RuleIssue[] {
+  const issues: RuleIssue[] = [];
+  const refTable = rule.executableParams.refTable as string | undefined;
+  const refField = rule.executableParams.refField as string | undefined;
+  const localField = rule.fieldName;
+
+  if (!refTable || !refField || !localField) return issues;
+
+  const refValues = refSets.get(`${refTable}.${refField}`);
+  if (!refValues) return issues;
+
+  for (const row of chunk) {
+    const val = String(row[localField] ?? '').trim();
+    if (!val) continue; // 空值由 notNull/notEmpty 规则处理
+    if (!refValues.has(val)) {
+      issues.push({
+        sheetName,
+        rowIndex: chunkStartIndex + chunk.indexOf(row) + 2,
+        fieldName: localField,
+        originalValue: val,
+        severity: rule.severity,
+        issueDescription: `${localField} 值 "${val}" 在参考表 ${refTable}.${refField} 中不存在`,
+      });
+    }
+  }
+  return issues;
+}
+
+/** 跨数据级汇总校验: 检查某 sheet 某字段的汇总值是否符合阈值 */
+function executeCrossAggregationRule(
+  rule: ParsedRule,
+  allSheets: Map<string, Record<string, unknown>[]>,
+): RuleIssue[] {
+  const issues: RuleIssue[] = [];
+  const { aggSheet, aggField, aggFunc, aggThreshold } = rule.executableParams as Record<string, string>;
+  if (!aggSheet || !aggField || !aggFunc || aggThreshold === undefined) return issues;
+
+  const targetSheet = [...allSheets.entries()].find(([n]) => n.includes(aggSheet));
+  if (!targetSheet) return issues;
+
+  const rows = targetSheet[1];
+  const values = rows
+    .map(r => Number(r[aggField]))
+    .filter(v => !isNaN(v));
+
+  let result: number | null = null;
+  if (aggFunc === 'sum' || aggFunc === 'SUM') {
+    result = values.reduce((a, b) => a + b, 0);
+  } else if (aggFunc === 'avg' || aggFunc === 'AVG') {
+    result = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+  } else if (aggFunc === 'count' || aggFunc === 'COUNT') {
+    result = values.length;
+  }
+
+  if (result !== null) {
+    const threshold = Number(aggThreshold);
+    if (!isNaN(threshold) && result > threshold) {
+      issues.push({
+        sheetName: targetSheet[0],
+        rowIndex: 1,
+        fieldName: aggField,
+        originalValue: String(result),
+        severity: rule.severity as 'error' | 'warning' | 'info',
+        issueDescription: `${aggSheet}.${aggField} 的 ${aggFunc} 值 ${result} 超过阈值 ${aggThreshold}`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
  * 分阶段分批执行校验。
  * 每完成一个批次就回调进度，便于前端实时更新和断点续跑。
  */
@@ -100,9 +179,16 @@ export async function executeValidation(
     }
     let total = 0;
     for (const [_name, rows] of allSheets) {
+      const matchingRules = crossRules.filter(r => !r.tableName || allSheets.has(r.tableName!) || nameIncludesAny(allSheets, r));
+      if (matchingRules.length === 0) continue;
       total += chunkRows(rows, batchSize).length;
     }
     return Math.max(total, 1);
+  }
+
+  function nameIncludesAny(sheets: Map<string, unknown[]>, rule: ParsedRule): boolean {
+    if (!rule.tableName) return true;
+    return [...sheets.keys()].some(n => n.includes(rule.tableName!));
   }
 
   let completedBatches = 0;
@@ -186,7 +272,7 @@ export async function executeValidation(
   // --- Phase 3: 跨数据级规则 ---
   const crossRules = parsedRules.filter(r => r.level === 'cross_dataset');
   const crossTotal = countCrossBatches(assets, crossRules);
-  let crossIssues: RuleIssue[] = [];
+  const crossIssues: RuleIssue[] = [];
 
   if (crossRules.length > 0) {
     // Collect all sheets
@@ -206,61 +292,66 @@ export async function executeValidation(
         if (refTable && refField) {
           const refSheet = [...allSheets.entries()].find(([n]) => n.includes(refTable));
           if (refSheet) {
-            const values = new Set(refSheet[1].map(r => String(r[refField] ?? '')));
+            const values = new Set(refSheet[1].map(r => String(r[refField] ?? '').trim()));
             refSets.set(`${refTable}.${refField}`, values);
           }
         }
       }
     }
 
-    for (const [sheetName, rows] of allSheets) {
-      const matchingRules = crossRules.filter(r => !r.tableName || sheetName.includes(r.tableName));
-      if (matchingRules.length === 0) continue;
+    // Process cross-table rules per sheet/chunk
+    const crossTableRules = crossRules.filter(r => r.executableType === 'cross_table');
+    if (crossTableRules.length > 0) {
+      for (const [sheetName, rows] of allSheets) {
+        const matchingRules = crossTableRules.filter(r => !r.tableName || sheetName.includes(r.tableName));
+        if (matchingRules.length === 0) continue;
 
-      const rowChunks = chunkRows(rows, batchSize);
-      for (let bi = 0; bi < rowChunks.length; bi++) {
-        const chunk = rowChunks[bi];
-        const phaseProgress = ((bi + 1) / rowChunks.length) * 100;
-        const totalProgress = Math.round(((completedBatches + bi + 1) / crossTotal) * 100);
+        const rowChunks = chunkRows(rows, batchSize);
+        for (let bi = 0; bi < rowChunks.length; bi++) {
+          const chunk = rowChunks[bi];
+          const globalStartIndex = bi * batchSize;
+          const phaseProgress = ((bi + 1) / rowChunks.length) * 100;
+          const totalProgress = Math.round(((completedBatches + bi + 1) / crossTotal) * 100);
 
-        for (const rule of matchingRules) {
-          if (rule.executableType === 'cross_table') {
-            const refTable = rule.executableParams.refTable as string;
-            const refField = rule.executableParams.refField as string;
-            const localField = rule.fieldName;
-            if (!refTable || !refField || !localField) continue;
-
-            const refValues = refSets.get(`${refTable}.${refField}`);
-            if (!refValues) continue;
-
-            for (const row of chunk) {
-              const val = String(row[localField] ?? '');
-              if (val && !refValues.has(val)) {
-                allIssues.push({
-                  sheetName,
-                  rowIndex: rows.indexOf(row) + 2,
-                  fieldName: localField,
-                  originalValue: val,
-                  severity: rule.severity,
-                  issueDescription: `${localField} 值 "${val}" 在 ${refTable} 中不存在`,
-                });
-              }
-            }
+          for (const rule of matchingRules) {
+            const issues = executeCrossTableRule(rule, sheetName, chunk, globalStartIndex, refSets);
+            allIssues.push(...issues);
+            crossIssues.push(...issues);
           }
-        }
 
-        crossIssues = allIssues.filter(i => crossIssues.includes(i) || i.severity !== undefined);
-        await onProgress({
-          phase: 'cross_level',
-          phaseLabel: '跨数据级校验',
-          batchNumber: completedBatches + bi + 1,
-          totalBatches: crossTotal,
-          phaseProgress: Math.round(phaseProgress),
-          totalProgress,
-          issues: allIssues.slice(-50),
-        });
+          await onProgress({
+            phase: 'cross_level',
+            phaseLabel: '跨数据级校验',
+            batchNumber: completedBatches + bi + 1,
+            totalBatches: crossTotal,
+            phaseProgress: Math.round(phaseProgress),
+            totalProgress,
+            issues: crossIssues.slice(-50),
+          });
+        }
+        completedBatches += rowChunks.length;
       }
-      completedBatches += rowChunks.length;
+    }
+
+    // Process aggregation rules (single pass, no chunking needed)
+    const aggRules = crossRules.filter(r => r.executableType === 'cross_aggregation' || r.executableParams.aggFunc);
+    if (aggRules.length > 0) {
+      for (const rule of aggRules) {
+        const issues = executeCrossAggregationRule(rule, allSheets);
+        allIssues.push(...issues);
+        crossIssues.push(...issues);
+      }
+
+      await onProgress({
+        phase: 'cross_level',
+        phaseLabel: '跨数据级校验',
+        batchNumber: completedBatches + 1,
+        totalBatches: crossTotal,
+        phaseProgress: 100,
+        totalProgress: Math.round(((completedBatches + 1) / crossTotal) * 100),
+        issues: crossIssues.slice(-50),
+      });
+      completedBatches += 1;
     }
   }
 
