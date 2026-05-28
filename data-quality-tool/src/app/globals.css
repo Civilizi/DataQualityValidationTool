@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f0f2f5;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Ant Design overrides */
+.ant-layout-sider {
+  overflow: hidden;
+}
+
+.ant-menu-dark.ant-menu-inline-collapsed .ant-menu-item .anticon + span {
+  display: none;
+}
+
+/* Main content area */
+.main-content {
+  background: #f0f2f5;
+  min-height: calc(100vh - 64px);
+}
+
+/* Card hover effect */
+.stat-card:hover {
+  transform: translateY(-2px);
+  transition: transform 0.2s ease;
+}
