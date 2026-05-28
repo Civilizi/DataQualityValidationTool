@@ -4,11 +4,13 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Button, Table, Tag, Space, message, Typography, Select,
   Statistic, Row, Col, Card, Descriptions, Breadcrumb, Spin,
+  Collapse, Popconfirm, Divider,
 } from 'antd';
 import {
   ArrowLeftOutlined, DownloadOutlined, FileExcelOutlined,
   CheckCircleOutlined, WarningOutlined, InfoCircleOutlined,
-  FileTextOutlined,
+  FileTextOutlined, CloudDownloadOutlined, DeleteOutlined,
+  FolderOutlined, FileOutlined, LinkOutlined,
 } from '@ant-design/icons';
 import { useRouter, useParams } from 'next/navigation';
 import type { ColumnsType } from 'antd/es/table';
@@ -23,6 +25,7 @@ interface TaskDetail {
   status: string;
   progress: number;
   current_phase: string | null;
+  asset_ids: string | null;
   total_rules: number;
   total_records: number;
   error_count: number;
@@ -36,6 +39,30 @@ interface TaskDetail {
   warning: number;
   info: number;
   total: number;
+}
+
+interface AssetInfo {
+  id: string;
+  display_name: string;
+  version: number;
+  row_count: number | null;
+}
+
+interface StandardInfo {
+  id: string;
+  display_name: string;
+  version: number;
+}
+
+interface DeliverableItem {
+  id: string;
+  task_id: string;
+  version: number;
+  type: string;
+  file_path: string;
+  file_size: number | null;
+  description: string | null;
+  created_at: string;
 }
 
 interface ResultRow {
@@ -66,6 +93,13 @@ const PHASE_MAP: Record<string, string> = {
   cross_level: '跨数据级',
 };
 
+function formatBytes(bytes: number | null): string {
+  if (!bytes) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function TaskDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -73,6 +107,9 @@ export default function TaskDetailPage() {
 
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [results, setResults] = useState<ResultRow[]>([]);
+  const [deliverables, setDeliverables] = useState<DeliverableItem[]>([]);
+  const [assets, setAssets] = useState<AssetInfo[]>([]);
+  const [standard, setStandard] = useState<StandardInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [resultLoading, setResultLoading] = useState(false);
   const [filterSeverity, setFilterSeverity] = useState<string>();
@@ -104,10 +141,36 @@ export default function TaskDetailPage() {
     }
   }, [taskId]);
 
+  const loadDeliverables = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/report`);
+      const json = await res.json();
+      if (json.success) setDeliverables(json.data);
+    } catch {
+      // ignore
+    }
+  }, [taskId]);
+
   useEffect(() => {
     loadTask();
     loadResults();
-  }, [loadTask, loadResults]);
+    loadDeliverables();
+  }, [loadTask, loadResults, loadDeliverables]);
+
+  // Load asset info
+  useEffect(() => {
+    if (!task?.asset_ids) return;
+    try {
+      const ids: string[] = JSON.parse(task.asset_ids);
+      Promise.all(ids.map(id => fetch(`/api/assets/${id}`).then(r => r.json())))
+        .then(resps => {
+          const valid = resps.filter(r => r.success).map(r => r.data);
+          setAssets(valid);
+        });
+    } catch {
+      // ignore
+    }
+  }, [task?.asset_ids]);
 
   const filteredResults = results.filter(r => {
     if (filterSeverity && r.severity !== filterSeverity) return false;
@@ -186,6 +249,59 @@ export default function TaskDetailPage() {
     },
   ];
 
+  const deliverableColumns: ColumnsType<DeliverableItem> = [
+    {
+      title: '类型',
+      dataIndex: 'type',
+      key: 'type',
+      width: 80,
+      render: (v: string) => (
+        <Tag color={v === 'report' ? 'purple' : 'blue'}>
+          {v === 'report' ? '报告' : v}
+        </Tag>
+      ),
+    },
+    {
+      title: '描述',
+      dataIndex: 'description',
+      key: 'description',
+      render: (v: string | null) => v || '-',
+    },
+    {
+      title: '文件大小',
+      dataIndex: 'file_size',
+      key: 'file_size',
+      width: 100,
+      render: (v: number | null) => formatBytes(v),
+    },
+    {
+      title: '生成时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 160,
+      render: (v: string) => (v ? new Date(v).toLocaleString('zh-CN') : '-'),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 100,
+      render: (_: any, record: DeliverableItem) => (
+        <Space>
+          <Button
+            type="link"
+            size="small"
+            icon={<DownloadOutlined />}
+            onClick={() => {
+              router.push(`/tasks/${taskId}/report`);
+            }}
+          >
+            查看
+          </Button>
+        </Space>
+      ),
+    },
+  ];
+
   if (loading) {
     return (
       <div style={{ padding: 24, textAlign: 'center' }}>
@@ -230,31 +346,61 @@ export default function TaskDetailPage() {
             type="primary"
             icon={<DownloadOutlined />}
             onClick={async () => {
-            try {
-              const res = await fetch(`/api/tasks/${taskId}/export`);
-              if (!res.ok) {
+              try {
+                const res = await fetch(`/api/tasks/${taskId}/export`);
+                if (!res.ok) {
+                  message.error('导出失败');
+                  return;
+                }
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${task.name}_校验结果.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                message.success('导出成功');
+              } catch {
                 message.error('导出失败');
-                return;
               }
-              const blob = await res.blob();
-              const url = window.URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = `${task.name}_校验结果.xlsx`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              window.URL.revokeObjectURL(url);
-              message.success('导出成功');
-            } catch {
-              message.error('导出失败');
-            }
-          }}
-        >
-          导出 Excel
-        </Button>
+            }}
+          >
+            导出 Excel
+          </Button>
         </Space>
       </div>
+
+      {/* 四元版本绑定 */}
+      <Card
+        size="small"
+        style={{ marginBottom: 24, background: '#fafafa' }}
+        title={<Space><LinkOutlined /> 版本追溯</Space>}
+      >
+        <Descriptions column={4} size="small">
+          <Descriptions.Item label="标准版本">
+            <Tag color="blue">v{task.standard_version || '-'}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="数据资产">
+            {assets.length > 0 ? (
+              <Space>
+                {assets.map(a => (
+                  <Tag key={a.id} color="green">
+                    <FolderOutlined /> {a.display_name} v{a.version}
+                  </Tag>
+                ))}
+              </Space>
+            ) : '-'}
+          </Descriptions.Item>
+          <Descriptions.Item label="任务版本">
+            <Tag color="purple">v{Math.ceil((new Date(task.created_at).getTime()) / 1000)}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="成果数量">
+            <Tag color="orange">{deliverables.length} 份</Tag>
+          </Descriptions.Item>
+        </Descriptions>
+      </Card>
 
       <Descriptions column={4} style={{ marginBottom: 24 }} bordered size="small">
         <Descriptions.Item label="状态">{task.status}</Descriptions.Item>
@@ -310,6 +456,25 @@ export default function TaskDetailPage() {
           </Card>
         </Col>
       </Row>
+
+      {/* 成果列表 */}
+      {deliverables.length > 0 && (
+        <>
+          <Title level={4} style={{ marginBottom: 12 }}>
+            <CloudDownloadOutlined style={{ marginRight: 8 }} />
+            成果文件 ({deliverables.length})
+          </Title>
+          <Table
+            columns={deliverableColumns}
+            dataSource={deliverables}
+            rowKey="id"
+            pagination={false}
+            size="small"
+            style={{ marginBottom: 24 }}
+          />
+          <Divider />
+        </>
+      )}
 
       <div style={{ marginBottom: 16 }}>
         <Text>筛选：</Text>

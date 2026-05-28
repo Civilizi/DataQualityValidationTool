@@ -12,6 +12,7 @@ import type {
   FieldAliasRow,
   UploadSessionRow,
   ExecutionLogRow,
+  DeliverableRow,
 } from '../../types/database';
 
 // ============================================================
