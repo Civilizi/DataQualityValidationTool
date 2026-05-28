@@ -1,13 +1,21 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Button, Table, Tag, Space, Upload, message, Typography, Popconfirm, Empty } from 'antd';
-import { UploadOutlined, DeleteOutlined, FileExcelOutlined } from '@ant-design/icons';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Button, Table, Tag, Space, message, Typography, Popconfirm, Empty,
+  Modal, Progress, Select,
+} from 'antd';
+import {
+  UploadOutlined, DeleteOutlined, FileExcelOutlined, PauseCircleOutlined,
+  CloudUploadOutlined,
+} from '@ant-design/icons';
 import { useRouter } from 'next/navigation';
 import { useDomainStore } from '@/lib/stores/domainStore';
 import type { ColumnsType } from 'antd/es/table';
 
 const { Title, Text } = Typography;
+
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per chunk
 
 interface AssetRow {
   id: string;
@@ -45,6 +53,15 @@ export default function AssetsPage() {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
 
+  // Chunked upload state
+  const [chunkModalVisible, setChunkModalVisible] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatusText, setUploadStatusText] = useState('');
+  const [uploadPaused, setUploadPaused] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const abortRef = useRef(false);
+
   useEffect(() => {
     if (currentDomain?.id) loadAssets();
   }, [currentDomain?.id]);
@@ -63,35 +80,145 @@ export default function AssetsPage() {
     }
   }
 
-  async function handleUpload(file: File) {
-    if (!currentDomain) {
-      message.error('请先选择业务域');
-      return false;
-    }
+  function handleFileSelect(file: File) {
+    setSelectedFile(file);
+    setChunkModalVisible(true);
+    setUploadProgress(0);
+    setUploadStatusText('');
+    setUploadPaused(false);
+    setSessionId(null);
+    return false;
+  }
+
+  async function handleChunkUpload() {
+    if (!selectedFile || !currentDomain) return;
     setUploading(true);
+    abortRef.current = false;
+
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('domainId', currentDomain.id);
-      const res = await fetch('/api/assets', { method: 'POST', body: formData });
-      const json = await res.json();
-      if (json.success) {
-        message.success(`素材 "${json.data.display_name}" 上传成功`);
+      // Step 1: Initialize upload session
+      const initRes = await fetch('/api/assets/upload/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: selectedFile.name,
+          fileSize: selectedFile.size,
+          chunkSize: CHUNK_SIZE,
+          domainId: currentDomain.id,
+        }),
+      });
+      const initJson = await initRes.json();
+      if (!initJson.success) {
+        message.error(initJson.error?.message || '初始化上传失败');
+        setUploading(false);
+        return;
+      }
+
+      const sid = initJson.data.sessionId;
+      const totalChunks = initJson.data.totalChunks;
+      setSessionId(sid);
+
+      // Check for already uploaded chunks
+      const statusRes = await fetch(`/api/assets/upload/status?sessionId=${sid}`);
+      const statusJson = await statusRes.json();
+      let uploadedChunks: number[] = [];
+      if (statusJson.success) {
+        uploadedChunks = statusJson.data.uploadedChunks || [];
+      }
+
+      setUploadStatusText(`已恢复 ${uploadedChunks.length}/${totalChunks} 个分片`);
+
+      // Step 2: Upload chunks
+      for (let i = 0; i < totalChunks; i++) {
+        if (abortRef.current) {
+          setUploadStatusText('已暂停上传');
+          setUploadPaused(true);
+          setUploading(false);
+          return;
+        }
+
+        if (uploadedChunks.includes(i)) {
+          setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
+          continue;
+        }
+
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
+        const chunk = selectedFile.slice(start, end);
+
+        const formData = new FormData();
+        formData.append('sessionId', sid);
+        formData.append('chunkIndex', String(i));
+        formData.append('chunk', chunk);
+
+        const chunkRes = await fetch('/api/assets/upload/chunk', { method: 'POST', body: formData });
+        const chunkJson = await chunkRes.json();
+        if (!chunkJson.success) {
+          message.error(chunkJson.error?.message || '分片上传失败');
+          setUploading(false);
+          return;
+        }
+
+        setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
+        setUploadStatusText(`正在上传 ${i + 1}/${totalChunks}`);
+      }
+
+      // Step 3: Complete upload
+      setUploadStatusText('正在合并文件...');
+      const completeRes = await fetch('/api/assets/upload/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, domainId: currentDomain.id }),
+      });
+      const completeJson = await completeRes.json();
+      if (completeJson.success) {
+        message.success(`素材上传成功: ${selectedFile.name}`);
+        setChunkModalVisible(false);
+        setSelectedFile(null);
+        setSessionId(null);
         loadAssets();
       } else {
-        message.error(json.error?.message || '上传失败');
+        message.error(completeJson.error?.message || '合并文件失败');
       }
     } catch {
       message.error('上传失败');
     } finally {
       setUploading(false);
     }
-    return false;
+  }
+
+  function handlePauseUpload() {
+    abortRef.current = true;
+  }
+
+  async function handleCancelUpload() {
+    abortRef.current = true;
+    if (sessionId) {
+      try {
+        await fetch(`/api/assets/upload/status?sessionId=${sessionId}`, { method: 'DELETE' });
+      } catch {
+        // ignore
+      }
+    }
+    setChunkModalVisible(false);
+    setUploading(false);
+    setUploadPaused(false);
+    setSelectedFile(null);
+    setSessionId(null);
+  }
+
+  async function handleResumeUpload() {
+    setUploadPaused(false);
+    setUploading(true);
+    // Re-trigger the upload from where it left off
+    // The server already tracks uploaded chunks, so we just continue
+    abortRef.current = false;
+    await handleChunkUpload();
   }
 
   async function handleDelete(id: string) {
     try {
-      const res = await fetch(`/api/assets/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/assets?id=${id}`, { method: 'DELETE' });
       const json = await res.json();
       if (json.success) {
         message.success('删除成功');
@@ -113,6 +240,7 @@ export default function AssetsPage() {
         <Space>
           <FileExcelOutlined style={{ color: '#52c41a' }} />
           <span>{val || record.name}</span>
+          <Tag color="blue" style={{ marginLeft: 4 }}>v{record.version}</Tag>
         </Space>
       ),
     },
@@ -196,18 +324,20 @@ export default function AssetsPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 24 }}>
         <div>
           <Title level={3} style={{ margin: 0 }}>素材池</Title>
-          <Text type="secondary">上传业务数据 Excel 文件作为校验素材</Text>
+          <Text type="secondary">上传业务数据 Excel 文件作为校验素材，支持分片断点续传</Text>
         </div>
-        <Upload
-          accept=".xlsx,.xls"
-          showUploadList={false}
-          beforeUpload={handleUpload}
-          disabled={uploading}
-        >
-          <Button type="primary" icon={<UploadOutlined />} loading={uploading}>
-            上传素材
-          </Button>
-        </Upload>
+        <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.xlsx,.xls';
+          input.onchange = (e: Event) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (file) handleFileSelect(file);
+          };
+          input.click();
+        }}>
+          上传素材
+        </Button>
       </div>
 
       <Table
@@ -218,6 +348,43 @@ export default function AssetsPage() {
         locale={{ emptyText: '暂无素材，请上传 Excel 数据文件' }}
         pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
       />
+
+      {/* Chunked upload modal */}
+      <Modal
+        title={<Space><CloudUploadOutlined /> 分片上传</Space>}
+        open={chunkModalVisible}
+        onCancel={handleCancelUpload}
+        footer={null}
+        closable={!uploading}
+        maskClosable={!uploading}
+      >
+        <div style={{ padding: '16px 0' }}>
+          <Space style={{ marginBottom: 16 }}>
+            <FileExcelOutlined style={{ color: '#52c41a' }} />
+            <Text strong>{selectedFile?.name}</Text>
+            <Text type="secondary">{formatBytes(selectedFile?.size ?? null)}</Text>
+          </Space>
+
+          <Progress percent={uploadProgress} status={uploadPaused ? 'exception' : 'active'} />
+
+          <Text type="secondary" style={{ marginTop: 8, display: 'block' }}>
+            {uploadStatusText || '准备上传...'}
+          </Text>
+
+          <Space style={{ marginTop: 16 }}>
+            {uploading && (
+              <Button danger icon={<PauseCircleOutlined />} onClick={handlePauseUpload}>
+                暂停
+              </Button>
+            )}
+            {uploadPaused && (
+              <Button type="primary" icon={<UploadOutlined />} onClick={handleResumeUpload}>
+                继续上传
+              </Button>
+            )}
+          </Space>
+        </div>
+      </Modal>
     </div>
   );
 }
