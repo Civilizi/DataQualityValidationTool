@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import {
   Layout,
@@ -10,6 +10,7 @@ import {
   Avatar,
   Dropdown,
   Typography,
+  Button,
 } from 'antd';
 import {
   DashboardOutlined,
@@ -23,7 +24,10 @@ import {
   DownOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  PlusOutlined,
 } from '@ant-design/icons';
+import { useDomainStore, type DomainInfo } from '@/lib/stores/domainStore';
+import { DomainManager } from '@/components/dashboard/DomainManager';
 
 const { Sider, Content, Header } = Layout;
 const { Title } = Typography;
@@ -38,12 +42,6 @@ const navItems = [
   { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
 
-const domains = [
-  { value: 'hr', label: '人力资源' },
-  { value: 'finance', label: '财务' },
-  { value: 'sales', label: '销售' },
-];
-
 export default function MainLayout({
   children,
 }: {
@@ -52,7 +50,12 @@ export default function MainLayout({
   const router = useRouter();
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
-  const [selectedDomain, setSelectedDomain] = useState<string>('hr');
+  const { domains, currentDomain, loadDomains, setCurrentDomain } = useDomainStore();
+  const [managerOpen, setManagerOpen] = useState(false);
+
+  useEffect(() => {
+    loadDomains();
+  }, [loadDomains]);
 
   const menuItems = navItems.map((item) => ({
     key: item.key,
@@ -64,6 +67,18 @@ export default function MainLayout({
     { key: 'profile', label: '个人设置' },
     { key: 'logout', label: '退出登录' },
   ];
+
+  const selectOptions = domains.map((d: DomainInfo) => ({
+    value: d.id,
+    label: d.name,
+  }));
+
+  const handleDomainChange = (value: string) => {
+    const domain = domains.find((d: DomainInfo) => d.id === value);
+    if (domain) {
+      setCurrentDomain(domain);
+    }
+  };
 
   return (
     <Layout className="min-h-screen">
@@ -121,13 +136,39 @@ export default function MainLayout({
             </button>
             <div className="flex items-center gap-2">
               <span className="text-gray-500 text-sm">当前业务域：</span>
-              <Select
-                value={selectedDomain}
-                onChange={setSelectedDomain}
-                options={domains}
-                style={{ minWidth: 120 }}
-                size="middle"
-              />
+              {domains.length === 0 ? (
+                <Button
+                  type="primary"
+                  size="middle"
+                  icon={<PlusOutlined />}
+                  onClick={() => setManagerOpen(true)}
+                >
+                  创建业务域
+                </Button>
+              ) : (
+                <Select
+                  value={currentDomain?.id}
+                  onChange={handleDomainChange}
+                  options={selectOptions}
+                  style={{ minWidth: 140 }}
+                  size="middle"
+                  dropdownRender={(menu) => (
+                    <>
+                      {menu}
+                      <div className="p-2 border-t border-gray-100">
+                        <Button
+                          type="link"
+                          size="small"
+                          block
+                          onClick={() => setManagerOpen(true)}
+                        >
+                          管理业务域
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                />
+              )}
             </div>
           </div>
           <Space size={16}>
@@ -144,6 +185,8 @@ export default function MainLayout({
           {children}
         </Content>
       </Layout>
+
+      <DomainManager open={managerOpen} onClose={() => setManagerOpen(false)} />
     </Layout>
   );
 }

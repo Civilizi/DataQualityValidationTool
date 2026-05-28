@@ -10,6 +10,7 @@ import type {
   AiConfigRow,
   AuditLogRow,
   FieldAliasRow,
+  UploadSessionRow,
 } from '../../types/database';
 
 // ============================================================
@@ -499,3 +500,206 @@ export const fieldAliases = {
     return result.changes > 0;
   },
 };
+
+// ============================================================
+// Standalone helper functions (for API route convenience)
+// ============================================================
+
+// --- data_standards ---
+
+export async function getStandardsByDomain(domainId: string): Promise<DataStandardRow[]> {
+  return all<DataStandardRow>(
+    'SELECT * FROM data_standards WHERE domain_id = ? ORDER BY name, version DESC',
+    [domainId],
+  );
+}
+
+export async function getStandardById(id: string): Promise<DataStandardRow | undefined> {
+  return get<DataStandardRow>('SELECT * FROM data_standards WHERE id = ?', [id]);
+}
+
+export async function updateStandard(id: string, updates: Partial<DataStandardRow>): Promise<void> {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const allowed = ['name', 'display_name', 'version', 'file_path', 'file_size', 'file_hash', 'parse_status', 'total_rules', 'confirmed_rules'] as const;
+  for (const key of allowed) {
+    if ((updates as Record<string, unknown>)[key] !== undefined) {
+      clauses.push(`${key} = ?`);
+      params.push((updates as Record<string, unknown>)[key]);
+    }
+  }
+  if (clauses.length === 0) return;
+  clauses.push('updated_at = ?');
+  params.push(new Date().toISOString());
+  params.push(id);
+  await run(`UPDATE data_standards SET ${clauses.join(', ')} WHERE id = ?`, params);
+}
+
+export async function deleteStandard(id: string): Promise<void> {
+  await run('DELETE FROM data_standards WHERE id = ?', [id]);
+}
+
+export async function getNextVersion(domainId: string, name: string): Promise<number> {
+  const row = await get<{ maxVersion: number }>(
+    'SELECT MAX(version) as maxVersion FROM data_standards WHERE domain_id = ? AND name = ?',
+    [domainId, name],
+  );
+  return (row?.maxVersion ?? 0) + 1;
+}
+
+// --- validation_rules ---
+
+export async function getRulesByStandard(standardId: string, status?: string): Promise<ValidationRuleRow[]> {
+  if (status) {
+    return all<ValidationRuleRow>(
+      'SELECT * FROM validation_rules WHERE standard_id = ? AND status = ? ORDER BY sort_order',
+      [standardId, status],
+    );
+  }
+  return all<ValidationRuleRow>(
+    'SELECT * FROM validation_rules WHERE standard_id = ? ORDER BY sort_order',
+    [standardId],
+  );
+}
+
+export async function createRule(rule: Omit<ValidationRuleRow, 'id'>): Promise<void> {
+  const now = new Date().toISOString();
+  const id = uuidv4();
+  await run(
+    `INSERT INTO validation_rules
+     (id, standard_id, table_name, field_name, dimension, level, original_text,
+      executable_type, executable_params, severity, confidence, status, sort_order,
+      created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, rule.standard_id, rule.table_name ?? null, rule.field_name ?? null,
+     rule.dimension ?? null, rule.level ?? null, rule.original_text ?? null,
+     rule.executable_type ?? null, rule.executable_params ?? null,
+     rule.severity ?? 'warning', rule.confidence ?? 0, rule.status ?? 'pending',
+     rule.sort_order ?? 0, now, now],
+  );
+}
+
+export async function updateRule(id: string, updates: Partial<ValidationRuleRow>): Promise<void> {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const allowed = ['standard_id', 'table_name', 'field_name', 'dimension', 'level', 'original_text',
+    'executable_type', 'executable_params', 'severity', 'confidence', 'status', 'sort_order'] as const;
+  for (const key of allowed) {
+    if ((updates as Record<string, unknown>)[key] !== undefined) {
+      clauses.push(`${key} = ?`);
+      params.push((updates as Record<string, unknown>)[key]);
+    }
+  }
+  if (clauses.length === 0) return;
+  clauses.push('updated_at = ?');
+  params.push(new Date().toISOString());
+  params.push(id);
+  await run(`UPDATE validation_rules SET ${clauses.join(', ')} WHERE id = ?`, params);
+}
+
+export async function deleteRule(id: string): Promise<void> {
+  await run('DELETE FROM validation_rules WHERE id = ?', [id]);
+}
+
+export async function batchConfirmRules(ruleIds: string[]): Promise<void> {
+  if (ruleIds.length === 0) return;
+  const now = new Date().toISOString();
+  const placeholders = ruleIds.map(() => '?').join(', ');
+  await run(
+    `UPDATE validation_rules SET status = 'confirmed', confidence = 1, updated_at = ? WHERE id IN (${placeholders})`,
+    [now, ...ruleIds],
+  );
+}
+
+export async function getRulesByDomain(domainId: string): Promise<ValidationRuleRow[]> {
+  return all<ValidationRuleRow>(
+    `SELECT r.* FROM validation_rules r
+     JOIN data_standards s ON r.standard_id = s.id
+     WHERE s.domain_id = ?
+     ORDER BY r.sort_order`,
+    [domainId],
+  );
+}
+
+// --- data_assets ---
+
+export async function getAssetsByDomain(domainId: string): Promise<DataAssetRow[]> {
+  return all<DataAssetRow>(
+    'SELECT * FROM data_assets WHERE domain_id = ? ORDER BY created_at DESC',
+    [domainId],
+  );
+}
+
+export async function getAssetById(id: string): Promise<DataAssetRow | undefined> {
+  return get<DataAssetRow>('SELECT * FROM data_assets WHERE id = ?', [id]);
+}
+
+export async function createAsset(asset: Omit<DataAssetRow, 'id'>): Promise<void> {
+  const now = new Date().toISOString();
+  const id = uuidv4();
+  await run(
+    `INSERT INTO data_assets
+     (id, domain_id, name, display_name, version, file_path, file_size, file_hash,
+      sheet_names, row_count, column_names, upload_status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, asset.domain_id, asset.name, asset.display_name ?? null, asset.version ?? 1,
+     asset.file_path ?? null, asset.file_size ?? null, asset.file_hash ?? null,
+     asset.sheet_names ?? null, asset.row_count ?? null, asset.column_names ?? null,
+     asset.upload_status ?? 'pending', now, now],
+  );
+}
+
+export async function deleteAsset(id: string): Promise<void> {
+  await run('DELETE FROM data_assets WHERE id = ?', [id]);
+}
+
+export async function getNextAssetVersion(domainId: string, name: string): Promise<number> {
+  const row = await get<{ maxVersion: number }>(
+    'SELECT MAX(version) as maxVersion FROM data_assets WHERE domain_id = ? AND name = ?',
+    [domainId, name],
+  );
+  return (row?.maxVersion ?? 0) + 1;
+}
+
+// --- upload_sessions ---
+
+export async function createUploadSession(session: Omit<UploadSessionRow, 'id'>): Promise<string> {
+  const now = new Date().toISOString();
+  const id = uuidv4();
+  await run(
+    `INSERT INTO upload_sessions
+     (id, asset_id, file_name, file_size, file_hash, chunk_size, total_chunks,
+      uploaded_chunks, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, session.asset_id ?? null, session.file_name, session.file_size,
+     session.file_hash ?? null, session.chunk_size, session.total_chunks,
+     session.uploaded_chunks, session.status ?? 'uploading', now, now],
+  );
+  return id;
+}
+
+export async function getUploadSession(sessionId: string): Promise<UploadSessionRow | undefined> {
+  return get<UploadSessionRow>('SELECT * FROM upload_sessions WHERE id = ?', [sessionId]);
+}
+
+export async function updateUploadSession(sessionId: string, updates: Partial<UploadSessionRow>): Promise<void> {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const allowed = ['asset_id', 'file_name', 'file_size', 'file_hash', 'chunk_size', 'total_chunks',
+    'uploaded_chunks', 'status'] as const;
+  for (const key of allowed) {
+    if ((updates as Record<string, unknown>)[key] !== undefined) {
+      clauses.push(`${key} = ?`);
+      params.push((updates as Record<string, unknown>)[key]);
+    }
+  }
+  if (clauses.length === 0) return;
+  clauses.push('updated_at = ?');
+  params.push(new Date().toISOString());
+  params.push(sessionId);
+  await run(`UPDATE upload_sessions SET ${clauses.join(', ')} WHERE id = ?`, params);
+}
+
+export async function deleteUploadSession(sessionId: string): Promise<void> {
+  await run('DELETE FROM upload_sessions WHERE id = ?', [sessionId]);
+}

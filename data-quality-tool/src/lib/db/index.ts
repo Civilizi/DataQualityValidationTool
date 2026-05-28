@@ -30,7 +30,13 @@ export async function getDb(): Promise<Database> {
   if (dbPromise) return dbPromise;
 
   dbPromise = (async () => {
-    const SQL = await initSqlJs();
+    const wasmPath = path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
+    const SQL = await initSqlJs({
+      locateFile: (file: string) => {
+        if (file === 'sql-wasm.wasm') return wasmPath;
+        return file;
+      },
+    });
 
     let loaded = false;
     if (fs.existsSync(DB_PATH)) {
