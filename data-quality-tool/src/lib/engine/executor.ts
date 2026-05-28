@@ -16,125 +16,253 @@ const EXECUTOR_MAP: Record<string, RuleExecutor> = {
   cross_table: executors.crossTable,
 };
 
+export type PhaseName = 'field_level' | 'record_level' | 'cross_level';
+
+/** 校验进度回调 */
+export interface ProgressUpdate {
+  phase: PhaseName;
+  phaseLabel: string;
+  batchNumber: number;
+  totalBatches: number;
+  phaseProgress: number;
+  totalProgress: number;
+  issues: RuleIssue[];
+}
+
+/** 校验配置 */
+export interface ValidationConfig {
+  batchSize?: number;
+  resumeFromCheckpoint?: boolean;
+}
+
 /** 执行单个规则对单个 sheet 的校验 */
 function executeRule(rule: ParsedRule, sheetName: string, rows: Record<string, unknown>[]): RuleIssue[] {
   const executor = EXECUTOR_MAP[rule.executableType];
-  if (!executor) {
-    // Unknown rule type, skip
-    return [];
-  }
+  if (!executor) return [];
   return executor({ sheetName, rows, rule });
 }
 
+/** 按批次切分行数据 */
+function chunkRows(rows: Record<string, unknown>[], batchSize: number): Record<string, unknown>[][] {
+  const chunks: Record<string, unknown>[][] = [];
+  for (let i = 0; i < rows.length; i += batchSize) {
+    chunks.push(rows.slice(i, i + batchSize));
+  }
+  return chunks.length > 0 ? chunks : [rows];
+}
+
 /**
- * 执行所有规则对所有数据的校验。
- * 返回所有发现的问题列表。
+ * 分阶段分批执行校验。
+ * 每完成一个批次就回调进度，便于前端实时更新和断点续跑。
  */
 export async function executeValidation(
   assetFilePaths: string[],
   rules: Array<{ id: string; dbRow: Record<string, unknown> }>,
-  onProgress?: (phase: string, progress: number, issues: RuleIssue[]) => void,
+  onProgress: (update: ProgressUpdate) => Promise<void>,
+  config: ValidationConfig = {},
 ): Promise<RuleIssue[]> {
+  const { batchSize = 200, resumeFromCheckpoint = true } = config;
   const allIssues: RuleIssue[] = [];
   const parsedRules = rules.map(r => toParsedRule(r.id, r.dbRow));
 
-  // Phase 1: 字段级规则
+  // Load all asset data once
+  interface AssetData {
+    path: string;
+    sheets: Map<string, Record<string, unknown>[]>;
+  }
+  const assets: AssetData[] = [];
+  for (const assetPath of assetFilePaths) {
+    if (!fs.existsSync(assetPath)) continue;
+    const buffer = fs.readFileSync(assetPath);
+    const sheets = parseExcelFile(buffer);
+    assets.push({ path: assetPath, sheets });
+  }
+
+  // Calculate total batches for progress tracking
+  function countTotalBatches(phase: PhaseName, assetDataList: AssetData[], rulesForPhase: ParsedRule[]): number {
+    let total = 0;
+    for (const asset of assetDataList) {
+      for (const [sheetName, rows] of asset.sheets) {
+        const matchingRules = rulesForPhase.filter(r => !r.tableName || sheetName.includes(r.tableName));
+        if (matchingRules.length === 0) continue;
+        total += chunkRows(rows, batchSize).length;
+      }
+    }
+    return Math.max(total, 1);
+  }
+
+  function countCrossBatches(assetDataList: AssetData[], crossRules: ParsedRule[]): number {
+    const allSheets = new Map<string, Record<string, unknown>[]>();
+    for (const asset of assetDataList) {
+      for (const [name, rows] of asset.sheets) {
+        allSheets.set(name, rows);
+      }
+    }
+    let total = 0;
+    for (const [_name, rows] of allSheets) {
+      total += chunkRows(rows, batchSize).length;
+    }
+    return Math.max(total, 1);
+  }
+
+  let completedBatches = 0;
+
+  // --- Phase 1: 字段级规则 ---
   const fieldRules = parsedRules.filter(r => r.level === 'field' || !r.level);
-  let fieldIssueCount = 0;
+  const fieldTotal = countTotalBatches('field_level', assets, fieldRules);
+  let fieldIssues: RuleIssue[] = [];
 
-  onProgress?.('字段级校验', 0, []);
+  if (fieldRules.length > 0) {
+    for (const asset of assets) {
+      for (const [sheetName, rows] of asset.sheets) {
+        const matchingRules = fieldRules.filter(r => !r.tableName || sheetName.includes(r.tableName));
+        if (matchingRules.length === 0) continue;
 
-  for (const assetPath of assetFilePaths) {
-    if (!fs.existsSync(assetPath)) continue;
-    const buffer = fs.readFileSync(assetPath);
-    const sheets = parseExcelFile(buffer);
+        const rowChunks = chunkRows(rows, batchSize);
+        for (let bi = 0; bi < rowChunks.length; bi++) {
+          const chunk = rowChunks[bi];
+          const phaseProgress = ((bi + 1) / rowChunks.length) * 100;
+          const totalProgress = Math.round(((completedBatches + bi + 1) / fieldTotal) * 100);
 
-    for (const [sheetName, rows] of sheets) {
-      for (const rule of fieldRules) {
-        // If rule targets a specific table, skip non-matching sheets
-        if (rule.tableName && !sheetName.includes(rule.tableName)) continue;
+          for (const rule of matchingRules) {
+            const issues = executeRule(rule, sheetName, chunk);
+            allIssues.push(...issues);
+            fieldIssues.push(...issues);
+          }
 
-        const issues = executeRule(rule, sheetName, rows);
-        allIssues.push(...issues);
-        fieldIssueCount += issues.length;
+          await onProgress({
+            phase: 'field_level',
+            phaseLabel: '字段级校验',
+            batchNumber: completedBatches + bi + 1,
+            totalBatches: fieldTotal,
+            phaseProgress: Math.round(phaseProgress),
+            totalProgress,
+            issues: fieldIssues.slice(-50),
+          });
+        }
+        completedBatches += rowChunks.length;
       }
     }
   }
 
-  onProgress?.('字段级校验', 100, allIssues.slice(fieldIssueCount));
-
-  // Phase 2: 记录级规则
+  // --- Phase 2: 记录级规则 ---
   const recordRules = parsedRules.filter(r => r.level === 'record');
-  let recordStartIdx = allIssues.length;
+  const recordTotal = countTotalBatches('record_level', assets, recordRules);
+  let recordIssues: RuleIssue[] = [];
 
-  onProgress?.('记录级校验', 0, []);
+  if (recordRules.length > 0) {
+    for (const asset of assets) {
+      for (const [sheetName, rows] of asset.sheets) {
+        const matchingRules = recordRules.filter(r => !r.tableName || sheetName.includes(r.tableName));
+        if (matchingRules.length === 0) continue;
 
-  for (const assetPath of assetFilePaths) {
-    if (!fs.existsSync(assetPath)) continue;
-    const buffer = fs.readFileSync(assetPath);
-    const sheets = parseExcelFile(buffer);
+        const rowChunks = chunkRows(rows, batchSize);
+        for (let bi = 0; bi < rowChunks.length; bi++) {
+          const chunk = rowChunks[bi];
+          const phaseProgress = ((bi + 1) / rowChunks.length) * 100;
+          const totalProgress = Math.round(((completedBatches + bi + 1) / recordTotal) * 100);
 
-    for (const [sheetName, rows] of sheets) {
-      for (const rule of recordRules) {
-        if (rule.tableName && !sheetName.includes(rule.tableName)) continue;
-        const issues = executeRule(rule, sheetName, rows);
-        allIssues.push(...issues);
+          for (const rule of matchingRules) {
+            const issues = executeRule(rule, sheetName, chunk);
+            allIssues.push(...issues);
+            recordIssues.push(...issues);
+          }
+
+          await onProgress({
+            phase: 'record_level',
+            phaseLabel: '记录级校验',
+            batchNumber: completedBatches + bi + 1,
+            totalBatches: recordTotal,
+            phaseProgress: Math.round(phaseProgress),
+            totalProgress,
+            issues: recordIssues.slice(-50),
+          });
+        }
+        completedBatches += rowChunks.length;
       }
     }
   }
 
-  onProgress?.('记录级校验', 100, allIssues.slice(recordStartIdx));
-
-  // Phase 3: 跨表级规则
+  // --- Phase 3: 跨数据级规则 ---
   const crossRules = parsedRules.filter(r => r.level === 'cross_dataset');
-  let crossStartIdx = allIssues.length;
+  const crossTotal = countCrossBatches(assets, crossRules);
+  let crossIssues: RuleIssue[] = [];
 
-  onProgress?.('跨表级校验', 0, []);
-
-  // For cross-table rules, we need to collect all sheets from all assets
-  const allSheets = new Map<string, Record<string, unknown>[]>();
-  for (const assetPath of assetFilePaths) {
-    if (!fs.existsSync(assetPath)) continue;
-    const buffer = fs.readFileSync(assetPath);
-    const sheets = parseExcelFile(buffer);
-    for (const [name, rows] of sheets) {
-      allSheets.set(name, rows);
+  if (crossRules.length > 0) {
+    // Collect all sheets
+    const allSheets = new Map<string, Record<string, unknown>[]>();
+    for (const asset of assets) {
+      for (const [name, rows] of asset.sheets) {
+        allSheets.set(name, rows);
+      }
     }
-  }
 
-  for (const rule of crossRules) {
-    // For cross_table: check that referenced table's key exists
-    if (rule.executableType === 'cross_table') {
-      const refTable = rule.executableParams.refTable as string | undefined;
-      const refField = rule.executableParams.refField as string | undefined;
-      const localField = rule.fieldName;
-      if (!refTable || !refField || !localField) continue;
-
-      // Find the reference sheet
-      const refSheet = [...allSheets.entries()].find(([name]) => name.includes(refTable));
-      if (!refSheet) continue;
-      const refValues = new Set(refSheet[1].map(r => String(r[refField] ?? '')));
-
-      for (const [sheetName, rows] of allSheets.entries()) {
-        if (rule.tableName && !sheetName.includes(rule.tableName)) continue;
-        for (const row of rows) {
-          const val = String(row[localField] ?? '');
-          if (val && !refValues.has(val)) {
-            allIssues.push({
-              sheetName,
-              rowIndex: rows.indexOf(row) + 2,
-              fieldName: localField,
-              originalValue: val,
-              severity: rule.severity,
-              issueDescription: `${localField} 值 "${val}" 在 ${refTable} 中不存在`,
-            });
+    // Cross-table: build reference sets once
+    const refSets = new Map<string, Set<string>>();
+    for (const rule of crossRules) {
+      if (rule.executableType === 'cross_table') {
+        const refTable = rule.executableParams.refTable as string | undefined;
+        const refField = rule.executableParams.refField as string | undefined;
+        if (refTable && refField) {
+          const refSheet = [...allSheets.entries()].find(([n]) => n.includes(refTable));
+          if (refSheet) {
+            const values = new Set(refSheet[1].map(r => String(r[refField] ?? '')));
+            refSets.set(`${refTable}.${refField}`, values);
           }
         }
       }
     }
-  }
 
-  onProgress?.('跨表级校验', 100, allIssues.slice(crossStartIdx));
+    for (const [sheetName, rows] of allSheets) {
+      const matchingRules = crossRules.filter(r => !r.tableName || sheetName.includes(r.tableName));
+      if (matchingRules.length === 0) continue;
+
+      const rowChunks = chunkRows(rows, batchSize);
+      for (let bi = 0; bi < rowChunks.length; bi++) {
+        const chunk = rowChunks[bi];
+        const phaseProgress = ((bi + 1) / rowChunks.length) * 100;
+        const totalProgress = Math.round(((completedBatches + bi + 1) / crossTotal) * 100);
+
+        for (const rule of matchingRules) {
+          if (rule.executableType === 'cross_table') {
+            const refTable = rule.executableParams.refTable as string;
+            const refField = rule.executableParams.refField as string;
+            const localField = rule.fieldName;
+            if (!refTable || !refField || !localField) continue;
+
+            const refValues = refSets.get(`${refTable}.${refField}`);
+            if (!refValues) continue;
+
+            for (const row of chunk) {
+              const val = String(row[localField] ?? '');
+              if (val && !refValues.has(val)) {
+                allIssues.push({
+                  sheetName,
+                  rowIndex: rows.indexOf(row) + 2,
+                  fieldName: localField,
+                  originalValue: val,
+                  severity: rule.severity,
+                  issueDescription: `${localField} 值 "${val}" 在 ${refTable} 中不存在`,
+                });
+              }
+            }
+          }
+        }
+
+        crossIssues = allIssues.filter(i => crossIssues.includes(i) || i.severity !== undefined);
+        await onProgress({
+          phase: 'cross_level',
+          phaseLabel: '跨数据级校验',
+          batchNumber: completedBatches + bi + 1,
+          totalBatches: crossTotal,
+          phaseProgress: Math.round(phaseProgress),
+          totalProgress,
+          issues: allIssues.slice(-50),
+        });
+      }
+      completedBatches += rowChunks.length;
+    }
+  }
 
   return allIssues;
 }

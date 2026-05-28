@@ -11,6 +11,7 @@ import type {
   AuditLogRow,
   FieldAliasRow,
   UploadSessionRow,
+  ExecutionLogRow,
 } from '../../types/database';
 
 // ============================================================
@@ -703,3 +704,65 @@ export async function updateUploadSession(sessionId: string, updates: Partial<Up
 export async function deleteUploadSession(sessionId: string): Promise<void> {
   await run('DELETE FROM upload_sessions WHERE id = ?', [sessionId]);
 }
+
+// ============================================================
+// execution_logs
+// ============================================================
+
+export const executionLogs = {
+  async create(input: {
+    task_id: string;
+    phase: string;
+    batch_number: number;
+    batch_size: number;
+    status: string;
+    started_at: string;
+    completed_at?: string | null;
+    error_message?: string | null;
+    checkpoint_data?: string | null;
+  }): Promise<string> {
+    const now = new Date().toISOString();
+    const id = uuidv4();
+    await run(
+      `INSERT INTO execution_logs
+       (id, task_id, phase, batch_number, batch_size, status, started_at, completed_at, error_message, checkpoint_data, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, input.task_id, input.phase, input.batch_number, input.batch_size,
+       input.status, input.started_at, input.completed_at ?? null,
+       input.error_message ?? null, input.checkpoint_data ?? null, now],
+    );
+    return id;
+  },
+
+  async getByTask(taskId: string): Promise<ExecutionLogRow[]> {
+    return all<ExecutionLogRow>(
+      'SELECT * FROM execution_logs WHERE task_id = ? ORDER BY batch_number',
+      [taskId],
+    );
+  },
+
+  async getCheckpoint(taskId: string, phase: string, batchNumber: number): Promise<ExecutionLogRow | undefined> {
+    return get<ExecutionLogRow>(
+      'SELECT * FROM execution_logs WHERE task_id = ? AND phase = ? AND batch_number = ?',
+      [taskId, phase, batchNumber],
+    );
+  },
+
+  async update(id: string, updates: Partial<Pick<ExecutionLogRow, 'status' | 'completed_at' | 'error_message' | 'checkpoint_data'>>): Promise<void> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    const allowed = ['status', 'completed_at', 'error_message', 'checkpoint_data'] as const;
+    for (const key of allowed) {
+      if ((updates as Record<string, unknown>)[key] !== undefined) {
+        clauses.push(`${key} = ?`);
+        params.push((updates as Record<string, unknown>)[key]);
+      }
+    }
+    if (clauses.length === 0) return;
+    params.push(id);
+    await run(
+      `UPDATE execution_logs SET ${clauses.join(', ')} WHERE id = ?`,
+      params,
+    );
+  },
+};

@@ -1,13 +1,14 @@
 import { success, error, notFound, badRequest } from '@/app/api/response';
 import {
   validationTasks,
-  validationRules,
   getRulesByStandard,
   dataAssets,
   validationResults,
   auditLogs,
+  executionLogs,
 } from '@/lib/db/repository';
 import { executeValidation } from '@/lib/engine/executor';
+import type { ProgressUpdate } from '@/lib/engine/executor';
 
 export async function POST(
   _request: Request,
@@ -52,47 +53,70 @@ export async function POST(
       return badRequest('关联的资产文件不存在');
     }
 
+    // Start task
     await validationTasks.updateStatus(id, 'running', {
       progress: 0,
       current_phase: '准备中',
     });
 
+    let finalErrorCount = 0;
+    let finalWarningCount = 0;
+    let finalInfoCount = 0;
+    let totalIssues = 0;
+
+    // Progress callback: update task status and write execution log per batch
+    const onProgress = async (update: ProgressUpdate) => {
+      const logId = await executionLogs.create({
+        task_id: id,
+        phase: update.phase,
+        batch_number: update.batchNumber,
+        batch_size: update.issues.length,
+        status: 'completed',
+        started_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+        error_message: null,
+        checkpoint_data: JSON.stringify({
+          totalProgress: update.totalProgress,
+          issueCount: update.issues.length,
+        }),
+      });
+
+      await validationTasks.updateStatus(id, 'running', {
+        current_phase: update.phaseLabel,
+        progress: update.totalProgress,
+      });
+
+      // Save batch issues to validation_results
+      for (const issue of update.issues) {
+        await validationResults.create({
+          task_id: id,
+          rule_id: null,
+          phase: update.phase,
+          sheet_name: issue.sheetName,
+          row_index: issue.rowIndex,
+          field_name: issue.fieldName,
+          original_value: issue.originalValue,
+          severity: issue.severity,
+          issue_description: issue.issueDescription,
+          ai_diagnosis: null,
+          ai_suggestion: null,
+        });
+      }
+    };
+
+    // Execute validation
     const issues = await executeValidation(
       assetPaths,
       ruleRows.map(r => ({ id: r.id, dbRow: r as unknown as Record<string, unknown> })),
-      async (phase, progress, newIssues) => {
-        await validationTasks.updateProgress(id, progress, {
-          error_count: newIssues.filter(i => i.severity === 'error').length,
-          warning_count: newIssues.filter(i => i.severity === 'warning').length,
-          info_count: newIssues.filter(i => i.severity === 'info').length,
-        });
-        await validationTasks.updateStatus(id, 'running', {
-          current_phase: phase,
-          progress,
-        });
-      },
+      onProgress,
     );
 
-    for (const issue of issues) {
-      await validationResults.create({
-        task_id: id,
-        rule_id: null,
-        phase: 'field_level',
-        sheet_name: issue.sheetName,
-        row_index: issue.rowIndex,
-        field_name: issue.fieldName,
-        original_value: issue.originalValue,
-        severity: issue.severity,
-        issue_description: issue.issueDescription,
-        ai_diagnosis: null,
-        ai_suggestion: null,
-      });
-    }
+    totalIssues = issues.length;
+    finalErrorCount = issues.filter(i => i.severity === 'error').length;
+    finalWarningCount = issues.filter(i => i.severity === 'warning').length;
+    finalInfoCount = issues.filter(i => i.severity === 'info').length;
 
-    const errorCount = issues.filter(i => i.severity === 'error').length;
-    const warningCount = issues.filter(i => i.severity === 'warning').length;
-    const infoCount = issues.filter(i => i.severity === 'info').length;
-
+    // Complete task
     await validationTasks.updateStatus(id, 'completed', {
       progress: 100,
       current_phase: '已完成',
@@ -105,11 +129,22 @@ export async function POST(
         'task_complete',
         'validation_task',
         id,
-        { name: taskName, total_issues: issues.length, errorCount, warningCount, infoCount },
+        {
+          name: taskName,
+          total_issues: totalIssues,
+          error_count: finalErrorCount,
+          warning_count: finalWarningCount,
+          info_count: finalInfoCount,
+        },
       );
     }
 
-    return success({ issueCount: issues.length, errorCount, warningCount, infoCount });
+    return success({
+      issueCount: totalIssues,
+      errorCount: finalErrorCount,
+      warningCount: finalWarningCount,
+      infoCount: finalInfoCount,
+    });
   } catch (e: any) {
     if (taskId) {
       await validationTasks.updateStatus(taskId, 'failed', {
