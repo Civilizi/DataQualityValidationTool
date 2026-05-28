@@ -315,6 +315,13 @@ export const validationTasks = {
 // validation_results
 // ============================================================
 
+export async function getResultsByTask(taskId: string): Promise<ValidationResultRow[]> {
+  return all<ValidationResultRow>(
+    'SELECT * FROM validation_results WHERE task_id = ? ORDER BY severity, row_index',
+    [taskId],
+  );
+}
+
 export const validationResults = {
   async create(input: Omit<ValidationResultRow, 'id' | 'created_at'>): Promise<ValidationResultRow> {
     const now = new Date().toISOString();
