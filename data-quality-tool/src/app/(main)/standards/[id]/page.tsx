@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, Table, Tag, Space, message, Typography, Spin, Select, Modal, Input, Form } from 'antd';
-import { ArrowLeftOutlined, CheckOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons';
+import { Button, Table, Tag, Space, message, Typography, Spin, Select, Modal, Input, Form, Alert } from 'antd';
+import { ArrowLeftOutlined, CheckOutlined, ReloadOutlined, EditOutlined, WarningOutlined } from '@ant-design/icons';
 import { useRouter, useParams } from 'next/navigation';
 import type { ColumnsType } from 'antd/es/table';
 
@@ -62,6 +62,13 @@ const RULE_TYPES = [
   { value: 'cross_table', label: '跨表关联' },
 ];
 
+const CONFLICT_TYPE_MAP: Record<string, string> = {
+  duplicate_rule: '重复规则',
+  range_overlap: '范围冲突',
+  format_conflict: '格式冲突',
+  nullability_conflict: '非空冲突',
+};
+
 export default function StandardDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -77,6 +84,8 @@ export default function StandardDetailPage() {
   const [editingRule, setEditingRule] = useState<RuleRow | null>(null);
   const [filterLevel, setFilterLevel] = useState<string>();
   const [filterConfidence, setFilterConfidence] = useState<string>();
+  const [conflicts, setConflicts] = useState<Array<{ ruleA: string; ruleB: string; conflictType: string; description: string; severity: string }>>([]);
+  const [conflictLoading, setConflictLoading] = useState(false);
   const [editForm] = Form.useForm();
 
   const loadRules = useCallback(async () => {
@@ -88,6 +97,8 @@ export default function StandardDetailPage() {
         setStandardName(json.data.standard?.display_name || '');
         setParseStatus(json.data.standard?.parse_status || '');
         setRules(json.data.rules || []);
+        // Auto-detect conflicts
+        checkConflicts();
       }
     } catch {
       message.error('加载规则失败');
@@ -95,6 +106,19 @@ export default function StandardDetailPage() {
       setLoading(false);
     }
   }, [standardId]);
+
+  async function checkConflicts() {
+    setConflictLoading(true);
+    try {
+      const res = await fetch(`/api/rules/conflicts?standardId=${standardId}`);
+      const json = await res.json();
+      if (json.success) setConflicts(json.data);
+    } catch {
+      // ignore
+    } finally {
+      setConflictLoading(false);
+    }
+  }
 
   useEffect(() => {
     loadRules();
@@ -177,6 +201,13 @@ export default function StandardDetailPage() {
       });
     }
     setEditModalOpen(true);
+  }
+
+  // Build conflict set for quick lookup
+  const conflictRuleIds = new Set<string>();
+  for (const c of conflicts) {
+    conflictRuleIds.add(c.ruleA);
+    conflictRuleIds.add(c.ruleB);
   }
 
   // Filter rules
@@ -263,10 +294,17 @@ export default function StandardDetailPage() {
       dataIndex: 'status',
       key: 'status',
       width: 70,
-      render: (v: string) => (
-        <Tag color={v === 'confirmed' ? 'success' : v === 'rejected' ? 'error' : 'default'}>
-          {v === 'confirmed' ? '已确认' : v === 'rejected' ? '已拒绝' : '待确认'}
-        </Tag>
+      render: (v: string, record) => (
+        <Space size={4}>
+          <Tag color={v === 'confirmed' ? 'success' : v === 'rejected' ? 'error' : 'default'}>
+            {v === 'confirmed' ? '已确认' : v === 'rejected' ? '已拒绝' : '待确认'}
+          </Tag>
+          {conflictRuleIds.has(record.id) && (
+            <Tag color="red" style={{ margin: 0 }}>
+              <WarningOutlined /> 冲突
+            </Tag>
+          )}
+        </Space>
       ),
     },
     {
@@ -349,6 +387,26 @@ export default function StandardDetailPage() {
           />
         </Space>
       </div>
+
+      {conflicts.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          icon={<WarningOutlined />}
+          message={`检测到 ${conflicts.length} 组规则冲突`}
+          description={
+            <div style={{ marginTop: 8 }}>
+              {conflicts.map((c, i) => (
+                <div key={i} style={{ marginBottom: 4 }}>
+                  <Tag color={c.severity === 'error' ? 'red' : 'gold'}>{CONFLICT_TYPE_MAP[c.conflictType] || c.conflictType}</Tag>
+                  <Text>{c.description}</Text>
+                </div>
+              ))}
+            </div>
+          }
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       <Table
         columns={columns}
