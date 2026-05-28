@@ -118,6 +118,10 @@ export const dataStandards = {
     );
   },
 
+  async getAll(): Promise<DataStandardRow[]> {
+    return all<DataStandardRow>('SELECT * FROM data_standards ORDER BY name, version DESC');
+  },
+
   async getById(id: string): Promise<DataStandardRow | undefined> {
     return get<DataStandardRow>('SELECT * FROM data_standards WHERE id = ?', [id]);
   },

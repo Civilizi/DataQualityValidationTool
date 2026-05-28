@@ -26,7 +26,9 @@ export async function GET(request: Request) {
       return badRequest('domainId 参数不能为空');
     }
 
-    let standards = await getStandardsByDomain(domainId);
+    let standards = domainId === 'all'
+      ? await dataStandards.getAll()
+      : await getStandardsByDomain(domainId);
 
     if (status) {
       standards = standards.filter((s) => s.parse_status === status);

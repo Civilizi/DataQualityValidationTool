@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Button, Table, Tag, Space, Upload, message, Typography, Empty } from 'antd';
-import { UploadOutlined, EyeOutlined, DeleteOutlined } from '@ant-design/icons';
+import { UploadOutlined, EyeOutlined, DeleteOutlined, DiffOutlined } from '@ant-design/icons';
 import { useRouter } from 'next/navigation';
 import { useDomainStore } from '@/lib/stores/domainStore';
 import type { ColumnsType } from 'antd/es/table';
@@ -170,7 +170,11 @@ export default function StandardsPage() {
           <Title level={3} style={{ margin: 0 }}>数据标准</Title>
           <Text type="secondary">上传业务数据质量标准文件，AI 自动解析校验规则</Text>
         </div>
-        <Upload
+        <Space>
+          <Button icon={<DiffOutlined />} onClick={() => router.push('/standards/compare')}>
+            版本对比
+          </Button>
+          <Upload
           accept=".xlsx,.xls"
           showUploadList={false}
           beforeUpload={handleUpload}
@@ -180,6 +184,7 @@ export default function StandardsPage() {
             上传标准
           </Button>
         </Upload>
+        </Space>
       </div>
 
       <Table
