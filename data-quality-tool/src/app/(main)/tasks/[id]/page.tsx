@@ -167,6 +167,22 @@ export default function TaskDetailPage() {
       key: 'issue_description',
       ellipsis: true,
     },
+    {
+      title: 'AI 诊断',
+      dataIndex: 'ai_diagnosis',
+      key: 'ai_diagnosis',
+      width: 200,
+      ellipsis: true,
+      render: (v: string | null) => v || <Text type="secondary">分析中...</Text>,
+    },
+    {
+      title: 'AI 建议',
+      dataIndex: 'ai_suggestion',
+      key: 'ai_suggestion',
+      width: 200,
+      ellipsis: true,
+      render: (v: string | null) => v || '-',
+    },
   ];
 
   if (loading) {

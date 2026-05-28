@@ -361,6 +361,19 @@ export const validationResults = {
     }
     return summary;
   },
+
+  async update(id: string, updates: Partial<Pick<ValidationResultRow, 'ai_diagnosis' | 'ai_suggestion'>>): Promise<void> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (updates.ai_diagnosis !== undefined) { clauses.push('ai_diagnosis = ?'); params.push(updates.ai_diagnosis); }
+    if (updates.ai_suggestion !== undefined) { clauses.push('ai_suggestion = ?'); params.push(updates.ai_suggestion); }
+    if (clauses.length === 0) return;
+    params.push(id);
+    await run(
+      `UPDATE validation_results SET ${clauses.join(', ')} WHERE id = ?`,
+      params,
+    );
+  },
 };
 
 // ============================================================

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Card,
@@ -16,6 +16,9 @@ import {
   Form,
   Input,
   message,
+  Tag,
+  List,
+  Table,
 } from 'antd';
 import {
   FileTextOutlined,
@@ -30,17 +33,60 @@ import { DomainManager } from '@/components/dashboard/DomainManager';
 
 const { Title, Paragraph, Text } = Typography;
 
+interface RecentTask {
+  id: string;
+  name: string;
+  status: string;
+  progress: number;
+  total_rules: number;
+  error_count: number;
+  warning_count: number;
+  info_count: number;
+  created_at: string;
+  completed_at: string | null;
+}
+
+const STATUS_MAP: Record<string, { color: string; label: string }> = {
+  draft: { color: 'default', label: '草稿' },
+  pending: { color: 'blue', label: '待执行' },
+  running: { color: 'processing', label: '执行中' },
+  completed: { color: 'success', label: '已完成' },
+  failed: { color: 'error', label: '失败' },
+};
+
 export default function DashboardPage() {
   const router = useRouter();
   const { currentDomain, domains, loadDomains } = useDomainStore();
   const [loading, setLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [managerOpen, setManagerOpen] = useState(false);
+  const [recentTasks, setRecentTasks] = useState<RecentTask[]>([]);
+  const [taskLoading, setTaskLoading] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
     loadDomains().then(() => setLoading(false));
   }, [loadDomains]);
+
+  const loadRecentTasks = useCallback(async () => {
+    if (!currentDomain) return;
+    setTaskLoading(true);
+    try {
+      const res = await fetch(`/api/tasks?domainId=${currentDomain.id}`);
+      const json = await res.json();
+      if (json.success) {
+        setRecentTasks((json.data as RecentTask[]).slice(0, 10));
+      }
+    } catch {
+      // ignore
+    } finally {
+      setTaskLoading(false);
+    }
+  }, [currentDomain]);
+
+  useEffect(() => {
+    loadRecentTasks();
+  }, [currentDomain?.id, loadRecentTasks]);
 
   if (loading) {
     return (
@@ -102,7 +148,6 @@ export default function DashboardPage() {
           onOk={async () => {
             try {
               const values = await form.validateFields();
-              const { useDomainStore: _ } = await import('@/lib/stores/domainStore');
               const store = useDomainStore.getState();
               const created = await store.createDomain(values.name, values.description || undefined);
               if (created) {
@@ -153,7 +198,7 @@ export default function DashboardPage() {
     },
     {
       title: '校验规则',
-      value: currentDomain.standardCount, // TODO: fetch actual rule count
+      value: currentDomain.standardCount,
       icon: <CheckCircleOutlined />,
       color: '#faad14',
       suffix: '条',
@@ -188,6 +233,58 @@ export default function DashboardPage() {
       icon: <PlusOutlined />,
       color: '#722ed1',
       action: () => setCreateModalOpen(true),
+    },
+  ];
+
+  const taskColumns = [
+    {
+      title: '任务名称',
+      dataIndex: 'name',
+      key: 'name',
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 80,
+      render: (v: string) => {
+        const s = STATUS_MAP[v] || { color: 'default', label: v };
+        return <Tag color={s.color}>{s.label}</Tag>;
+      },
+    },
+    {
+      title: '问题数',
+      key: 'issues',
+      width: 150,
+      render: (_: any, record: RecentTask) => (
+        <Space size={4}>
+          {record.error_count > 0 && <Tag color="red">{record.error_count}</Tag>}
+          {record.warning_count > 0 && <Tag color="gold">{record.warning_count}</Tag>}
+          {record.info_count > 0 && <Tag color="blue">{record.info_count}</Tag>}
+          {record.error_count === 0 && record.warning_count === 0 && record.info_count === 0 && <Text type="secondary">0</Text>}
+        </Space>
+      ),
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 160,
+      render: (v: string) => (v ? new Date(v).toLocaleString('zh-CN') : '-'),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 80,
+      render: (_: any, record: RecentTask) => (
+        <Button
+          type="link"
+          size="small"
+          onClick={() => router.push(`/tasks/${record.id}`)}
+        >
+          查看
+        </Button>
+      ),
     },
   ];
 
@@ -265,24 +362,21 @@ export default function DashboardPage() {
 
       <Divider />
 
-      {/* Recent Tasks Placeholder */}
-      <Title level={4} className="mb-4">最近任务</Title>
-      <Card
-        bordered={false}
-        className="shadow-sm"
-        styles={{ body: { padding: '48px' } }}
-      >
-        <Empty
-          description={
-            <div>
-              <span className="text-gray-500 text-base">
-                当前业务域暂无校验任务
-              </span>
-              <div className="mt-2 text-gray-400 text-sm">
-                导入数据标准和素材后，可创建校验任务
-              </div>
-            </div>
-          }
+      {/* Recent Tasks */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <Title level={4} style={{ margin: 0 }}>最近任务</Title>
+        <Button type="link" onClick={() => router.push('/validation')}>
+          查看全部 <ArrowRightOutlined />
+        </Button>
+      </div>
+      <Card bordered={false} className="shadow-sm">
+        <Table
+          columns={taskColumns}
+          dataSource={recentTasks}
+          rowKey="id"
+          loading={taskLoading}
+          locale={{ emptyText: '暂无校验任务，导入数据标准和素材后可创建校验任务' }}
+          pagination={{ pageSize: 5, showTotal: (t) => `共 ${t} 条` }}
         />
       </Card>
 

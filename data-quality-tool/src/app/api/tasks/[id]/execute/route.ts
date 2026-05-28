@@ -9,6 +9,7 @@ import {
 } from '@/lib/db/repository';
 import { executeValidation } from '@/lib/engine/executor';
 import type { ProgressUpdate } from '@/lib/engine/executor';
+import { diagnoseIssues } from '@/lib/ai/diagnosis';
 
 export async function POST(
   _request: Request,
@@ -115,6 +116,20 @@ export async function POST(
     finalErrorCount = issues.filter(i => i.severity === 'error').length;
     finalWarningCount = issues.filter(i => i.severity === 'warning').length;
     finalInfoCount = issues.filter(i => i.severity === 'info').length;
+
+    // AI 辅助诊断：对发现的问题进行智能分析和解读
+    if (totalIssues > 0) {
+      await validationTasks.updateStatus(id, 'running', {
+        current_phase: 'AI 辅助分析中',
+        progress: 95,
+      });
+      try {
+        await diagnoseIssues(id);
+      } catch (e: any) {
+        // AI 诊断失败不影响任务完成
+        console.error('AI 诊断失败:', e);
+      }
+    }
 
     // Complete task
     await validationTasks.updateStatus(id, 'completed', {
