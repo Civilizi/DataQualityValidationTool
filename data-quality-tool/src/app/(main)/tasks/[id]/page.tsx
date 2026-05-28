@@ -8,6 +8,7 @@ import {
 import {
   ArrowLeftOutlined, DownloadOutlined, FileExcelOutlined,
   CheckCircleOutlined, WarningOutlined, InfoCircleOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons';
 import { useRouter, useParams } from 'next/navigation';
 import type { ColumnsType } from 'antd/es/table';
@@ -218,10 +219,17 @@ export default function TaskDetailPage() {
             {task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '执行中'}
           </Tag>
         </Space>
-        <Button
-          type="primary"
-          icon={<DownloadOutlined />}
-          onClick={async () => {
+        <Space>
+          <Button
+            icon={<FileTextOutlined />}
+            onClick={() => router.push(`/tasks/${taskId}/report`)}
+          >
+            质量分析报告
+          </Button>
+          <Button
+            type="primary"
+            icon={<DownloadOutlined />}
+            onClick={async () => {
             try {
               const res = await fetch(`/api/tasks/${taskId}/export`);
               if (!res.ok) {
@@ -245,6 +253,7 @@ export default function TaskDetailPage() {
         >
           导出 Excel
         </Button>
+        </Space>
       </div>
 
       <Descriptions column={4} style={{ marginBottom: 24 }} bordered size="small">
