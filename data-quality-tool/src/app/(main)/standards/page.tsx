@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Button, Table, Tag, Space, Upload, message, Typography, Empty } from 'antd';
-import { UploadOutlined, EyeOutlined, DeleteOutlined, DiffOutlined } from '@ant-design/icons';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, Table, Tag, Space, Upload, message, Typography, Empty, Tabs, Modal, Form, Input, Select, Popconfirm } from 'antd';
+import { UploadOutlined, EyeOutlined, DeleteOutlined, DiffOutlined, EditOutlined, WarningOutlined } from '@ant-design/icons';
 import { useRouter } from 'next/navigation';
 import { useDomainStore } from '@/lib/stores/domainStore';
+import { DIMENSION_COLORS, LEVEL_MAP, SEVERITY_MAP, CONFIDENCE_MAP, RULE_TYPES } from '@/lib/constants';
 import type { ColumnsType } from 'antd/es/table';
-import { Popconfirm } from 'antd';
 
 const { Title, Text } = Typography;
 
@@ -22,6 +22,25 @@ interface StandardRow {
   created_at: string;
 }
 
+interface RuleRow {
+  id: string;
+  standard_id: string;
+  table_name: string;
+  field_name: string;
+  dimension: string;
+  level: string;
+  original_text: string;
+  executable_type: string;
+  executable_params: string;
+  severity: string;
+  confidence: string;
+  status: string;
+  sort_order: number;
+  standard_name: string;
+  standard_display_name: string;
+  standard_version: number;
+}
+
 const STATUS_MAP: Record<string, { color: string; label: string }> = {
   pending: { color: 'default', label: '待解析' },
   parsing: { color: 'processing', label: '解析中' },
@@ -30,15 +49,27 @@ const STATUS_MAP: Record<string, { color: string; label: string }> = {
   failed: { color: 'error', label: '解析失败' },
 };
 
+// imported from @/lib/constants
+
 export default function StandardsPage() {
   const router = useRouter();
   const { currentDomain } = useDomainStore();
   const [standards, setStandards] = useState<StandardRow[]>([]);
+  const [rules, setRules] = useState<RuleRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [rulesLoading, setRulesLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingRule, setEditingRule] = useState<RuleRow | null>(null);
+  const [editForm] = Form.useForm();
+  const [filterStandard, setFilterStandard] = useState<string>();
+  const [filterDimension, setFilterDimension] = useState<string>();
 
   useEffect(() => {
-    if (currentDomain?.id) loadStandards();
+    if (currentDomain?.id) {
+      loadStandards();
+      loadRules();
+    }
   }, [currentDomain?.id]);
 
   async function loadStandards() {
@@ -52,6 +83,20 @@ export default function StandardsPage() {
       message.error('加载标准列表失败');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadRules() {
+    if (!currentDomain) return;
+    setRulesLoading(true);
+    try {
+      const res = await fetch(`/api/rules/pool?domainId=${currentDomain.id}&status=confirmed`);
+      const json = await res.json();
+      if (json.success) setRules(json.data);
+    } catch {
+      message.error('加载规则池失败');
+    } finally {
+      setRulesLoading(false);
     }
   }
 
@@ -88,6 +133,7 @@ export default function StandardsPage() {
       if (json.success) {
         message.success('删除成功');
         loadStandards();
+        loadRules();
       } else {
         message.error(json.error?.message || '删除失败');
       }
@@ -96,7 +142,63 @@ export default function StandardsPage() {
     }
   }
 
-  const columns: ColumnsType<StandardRow> = [
+  async function handleDeleteRule(id: string) {
+    try {
+      const res = await fetch(`/api/rules/${id}`, { method: 'DELETE' });
+      const json = await res.json();
+      if (json.success) {
+        message.success('规则已删除');
+        loadRules();
+      } else {
+        message.error(json.error?.message || '删除失败');
+      }
+    } catch {
+      message.error('删除失败');
+    }
+  }
+
+  async function handleEditRule(values: any) {
+    if (!editingRule) return;
+    try {
+      const res = await fetch(`/api/rules/${editingRule.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      });
+      const json = await res.json();
+      if (json.success) {
+        message.success('规则已更新');
+        setEditModalOpen(false);
+        setEditingRule(null);
+        loadRules();
+      }
+    } catch {
+      message.error('更新失败');
+      setEditModalOpen(false);
+      setEditingRule(null);
+    }
+  }
+
+  function openEditModal(rule: RuleRow) {
+    setEditingRule(rule);
+    try {
+      const params = rule.executable_params ? JSON.parse(rule.executable_params) : {};
+      editForm.setFieldsValue({
+        executable_type: rule.executable_type,
+        executable_params: JSON.stringify(params, null, 2),
+        severity: rule.severity,
+      });
+    } catch {
+      editForm.setFieldsValue({
+        executable_type: rule.executable_type,
+        executable_params: rule.executable_params,
+        severity: rule.severity,
+      });
+    }
+    setEditModalOpen(true);
+  }
+
+  const standardColumns: ColumnsType<StandardRow> = [
     {
       title: '标准名称',
       dataIndex: 'display_name',
@@ -154,6 +256,117 @@ export default function StandardsPage() {
     },
   ];
 
+  const filteredRules = rules.filter(r => {
+    if (filterStandard && r.standard_id !== filterStandard) return false;
+    if (filterDimension && r.dimension !== filterDimension) return false;
+    return true;
+  });
+
+  const ruleColumns: ColumnsType<RuleRow> = [
+    {
+      title: '所属标准',
+      key: 'standard',
+      width: 160,
+      render: (_, r) => <Text>{r.standard_display_name || r.standard_name}</Text>,
+    },
+    {
+      title: '表单名称',
+      dataIndex: 'table_name',
+      key: 'table_name',
+      width: 100,
+    },
+    {
+      title: '字段名',
+      dataIndex: 'field_name',
+      key: 'field_name',
+      width: 100,
+    },
+    {
+      title: '维度',
+      dataIndex: 'dimension',
+      key: 'dimension',
+      width: 80,
+      render: (v: string) => <Tag color={DIMENSION_COLORS[v] || 'default'}>{v}</Tag>,
+    },
+    {
+      title: '级别',
+      dataIndex: 'level',
+      key: 'level',
+      width: 90,
+      render: (v: string) => {
+        const m = LEVEL_MAP[v] || { color: 'default', label: v };
+        return <Tag color={m.color}>{m.label}</Tag>;
+      },
+    },
+    {
+      title: '原始规则',
+      dataIndex: 'original_text',
+      key: 'original_text',
+      ellipsis: true,
+    },
+    {
+      title: '可执行类型',
+      dataIndex: 'executable_type',
+      key: 'executable_type',
+      width: 100,
+      render: (v: string) => {
+        const found = RULE_TYPES.find(t => t.value === v);
+        return found?.label || v;
+      },
+    },
+    {
+      title: '置信度',
+      dataIndex: 'confidence',
+      key: 'confidence',
+      width: 80,
+      render: (v: string) => {
+        const m = CONFIDENCE_MAP[v] || { color: 'default', label: v };
+        return <Tag color={m.color}>{m.label}</Tag>;
+      },
+    },
+    {
+      title: '严重等级',
+      dataIndex: 'severity',
+      key: 'severity',
+      width: 70,
+      render: (v: string) => {
+        const m = SEVERITY_MAP[v] || { color: 'default', label: v };
+        return <Tag color={m.color}>{m.label}</Tag>;
+      },
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 120,
+      render: (_, record) => (
+        <Space>
+          <Button
+            type="link"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => openEditModal(record)}
+          >
+            编辑
+          </Button>
+          <Popconfirm
+            title="确认删除"
+            onConfirm={() => handleDeleteRule(record.id)}
+          >
+            <Button type="link" size="small" danger icon={<DeleteOutlined />}>删除</Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  const uniqueStandards = Array.from(new Map(standards.map(s => [s.id, s])).values());
+
+  const dimensionOptions = [
+    { label: '字段级', value: 'field' },
+    { label: '记录级', value: 'record' },
+    { label: '跨数据集级', value: 'cross_dataset' },
+  ];
+
   if (!currentDomain) {
     return (
       <div style={{ padding: 24 }}>
@@ -175,26 +388,108 @@ export default function StandardsPage() {
             版本对比
           </Button>
           <Upload
-          accept=".xlsx,.xls"
-          showUploadList={false}
-          beforeUpload={handleUpload}
-          disabled={uploading}
-        >
-          <Button type="primary" icon={<UploadOutlined />} loading={uploading}>
-            上传标准
-          </Button>
-        </Upload>
+            accept=".xlsx,.xls"
+            showUploadList={false}
+            beforeUpload={handleUpload}
+            disabled={uploading}
+          >
+            <Button type="primary" icon={<UploadOutlined />} loading={uploading}>
+              上传标准
+            </Button>
+          </Upload>
         </Space>
       </div>
 
-      <Table
-        columns={columns}
-        dataSource={standards}
-        rowKey="id"
-        loading={loading}
-        locale={{ emptyText: '暂无标准，请上传 Excel 标准文件' }}
-        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+      <Tabs
+        defaultActiveKey="standards"
+        items={[
+          {
+            key: 'standards',
+            label: `标准列表 (${standards.length})`,
+            children: (
+              <Table
+                columns={standardColumns}
+                dataSource={standards}
+                rowKey="id"
+                loading={loading}
+                locale={{ emptyText: '暂无标准，请上传 Excel 标准文件' }}
+                pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+              />
+            ),
+          },
+          {
+            key: 'rules',
+            label: `规则池 (${rules.length})`,
+            children: (
+              <>
+                <div style={{ marginBottom: 16 }}>
+                  <Text>筛选：</Text>
+                  <Space style={{ marginLeft: 8 }}>
+                    <Select
+                      style={{ width: 160 }}
+                      placeholder="所属标准"
+                      allowClear
+                      value={filterStandard}
+                      onChange={setFilterStandard}
+                      options={uniqueStandards.map(s => ({
+                        label: `${s.display_name} v${s.version}`,
+                        value: s.id,
+                      }))}
+                    />
+                    <Select
+                      style={{ width: 120 }}
+                      placeholder="维度"
+                      allowClear
+                      value={filterDimension}
+                      onChange={setFilterDimension}
+                      options={dimensionOptions}
+                    />
+                  </Space>
+                </div>
+                <Table
+                  columns={ruleColumns}
+                  dataSource={filteredRules}
+                  rowKey="id"
+                  loading={rulesLoading}
+                  locale={{ emptyText: '暂无已确认规则，请先上传标准并确认规则' }}
+                  pagination={{ pageSize: 30, showTotal: (t) => `共 ${t} 条` }}
+                  scroll={{ x: 1200 }}
+                />
+              </>
+            ),
+          },
+        ]}
       />
+
+      <Modal
+        title="编辑规则"
+        open={editModalOpen}
+        onCancel={() => { setEditModalOpen(false); setEditingRule(null); }}
+        footer={null}
+        width={600}
+      >
+        <Form form={editForm} layout="vertical" onFinish={handleEditRule}>
+          <Form.Item name="executable_type" label="可执行类型" rules={[{ required: true }]}>
+            <Select options={RULE_TYPES} />
+          </Form.Item>
+          <Form.Item name="executable_params" label="规则参数 (JSON)">
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Form.Item name="severity" label="严重等级">
+            <Select>
+              <Select.Option value="error">严重</Select.Option>
+              <Select.Option value="warning">警告</Select.Option>
+              <Select.Option value="info">提示</Select.Option>
+            </Select>
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 0 }}>
+            <Space>
+              <Button type="primary" htmlType="submit">保存</Button>
+              <Button onClick={() => { setEditModalOpen(false); setEditingRule(null); }}>取消</Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }

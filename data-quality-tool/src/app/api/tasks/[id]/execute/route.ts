@@ -6,10 +6,12 @@ import {
   validationResults,
   auditLogs,
   executionLogs,
+  all,
 } from '@/lib/db/repository';
 import { executeValidation } from '@/lib/engine/executor';
 import type { ProgressUpdate } from '@/lib/engine/executor';
 import { diagnoseIssues } from '@/lib/ai/diagnosis';
+import type { ValidationRuleRow } from '@/types/database';
 
 export async function POST(
   _request: Request,
@@ -34,13 +36,31 @@ export async function POST(
     taskDomainId = task.domain_id;
     taskName = task.name;
 
-    if (!task.standard_id) {
-      return badRequest('任务未关联标准');
+    // Get rules: from explicit rule_ids (field_mappings) or from standard
+    let ruleRows: ValidationRuleRow[];
+    if (task.field_mappings) {
+      try {
+        const ruleIds: string[] = JSON.parse(task.field_mappings);
+        if (ruleIds.length > 0) {
+          const placeholders = ruleIds.map(() => '?').join(', ');
+          ruleRows = await all<ValidationRuleRow>(
+            `SELECT * FROM validation_rules WHERE id IN (${placeholders})`,
+            ruleIds,
+          );
+        } else {
+          ruleRows = [];
+        }
+      } catch {
+        ruleRows = [];
+      }
+    } else if (task.standard_id) {
+      ruleRows = await getRulesByStandard(task.standard_id, 'confirmed');
+    } else {
+      return badRequest('任务未配置规则');
     }
 
-    const ruleRows = await getRulesByStandard(task.standard_id, 'confirmed');
     if (ruleRows.length === 0) {
-      return badRequest('该标准暂无已确认的规则');
+      return badRequest('无可执行的校验规则');
     }
 
     const assetIdsArr: string[] = task.asset_ids ? JSON.parse(task.asset_ids) : [];

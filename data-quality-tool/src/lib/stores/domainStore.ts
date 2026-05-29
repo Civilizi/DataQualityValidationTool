@@ -8,6 +8,7 @@ export interface DomainInfo {
   standardCount: number;
   assetCount: number;
   taskCount: number;
+  ruleCount: number;
 }
 
 interface ApiDomain {
@@ -18,6 +19,7 @@ interface ApiDomain {
   standardsCount: number;
   assetsCount: number;
   tasksCount: number;
+  rulesCount: number;
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +33,7 @@ function toDomainInfo(raw: ApiDomain): DomainInfo {
     standardCount: raw.standardsCount ?? 0,
     assetCount: raw.assetsCount ?? 0,
     taskCount: raw.tasksCount ?? 0,
+    ruleCount: raw.rulesCount ?? 0,
   };
 }
 

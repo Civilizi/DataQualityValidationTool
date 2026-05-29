@@ -24,25 +24,38 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { name, domainId, standardId, assetIds } = body;
+    const { name, domainId, standardId, ruleIds, assetIds } = body;
 
-    if (!name || !domainId || !standardId) {
-      return badRequest('任务名称、业务域和标准为必填项');
+    if (!name || !domainId) {
+      return badRequest('任务名称和业务域为必填项');
     }
     if (!assetIds || !Array.isArray(assetIds) || assetIds.length === 0) {
       return badRequest('请至少选择一个数据资产');
     }
 
-    // Verify standard exists and has confirmed rules
-    const standard = await dataStandards.getById(standardId);
-    if (!standard) {
-      return badRequest('标准不存在');
-    }
-
-    // Count confirmed rules
-    const confirmedRules = await getRulesByStandard(standardId, 'confirmed');
-    if (confirmedRules.length === 0) {
-      return badRequest('该标准暂无已确认的规则，请先解析并确认校验规则');
+    // Determine rules and standard version
+    let totalRules: number;
+    let standardVersion: number | null = null;
+    if (ruleIds && ruleIds.length > 0) {
+      totalRules = ruleIds.length;
+      // Look up version from the first rule's standard
+      if (ruleIds.length > 0 && standardId) {
+        const std = await dataStandards.getById(standardId);
+        if (std) standardVersion = std.version;
+      }
+    } else if (standardId) {
+      const standard = await dataStandards.getById(standardId);
+      if (!standard) {
+        return badRequest('标准不存在');
+      }
+      const confirmedRules = await getRulesByStandard(standardId, 'confirmed');
+      if (confirmedRules.length === 0) {
+        return badRequest('该标准暂无已确认的规则，请先解析并确认校验规则');
+      }
+      totalRules = confirmedRules.length;
+      standardVersion = standard.version;
+    } else {
+      return badRequest('请选择校验规则或标准');
     }
 
     // Verify assets exist
@@ -58,8 +71,8 @@ export async function POST(request: Request) {
     const task = await validationTasks.create({
       domain_id: domainId,
       name,
-      standard_id: standardId,
-      standard_version: standard.version,
+      standard_id: standardId ?? null,
+      standard_version: standardVersion,
       status: 'pending',
       field_level_status: null,
       record_level_status: null,
@@ -67,9 +80,9 @@ export async function POST(request: Request) {
       progress: 0,
       current_phase: null,
       asset_ids: JSON.stringify(assetIds),
-      field_mappings: null,
+      field_mappings: ruleIds ? JSON.stringify(ruleIds) : null,
       total_records: 0,
-      total_rules: confirmedRules.length,
+      total_rules: totalRules,
       error_count: 0,
       warning_count: 0,
       info_count: 0,
@@ -85,10 +98,8 @@ export async function POST(request: Request) {
       task.id,
       {
         name,
-        standard_name: standard.display_name,
-        standard_version: standard.version,
+        rule_count: totalRules,
         asset_count: assetIds.length,
-        rule_count: confirmedRules.length,
       },
     );
 

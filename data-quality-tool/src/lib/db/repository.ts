@@ -1,5 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { run, all, get } from './index';
+
+// Re-export all for direct SQL queries
+export { all };
 import type {
   BusinessDomainRow,
   DataStandardRow,
@@ -38,26 +41,45 @@ export const businessDomains = {
     return all<BusinessDomainRow>('SELECT * FROM business_domains ORDER BY name');
   },
 
-  async getAllWithCounts(): Promise<Array<BusinessDomainRow & { standardsCount: number; assetsCount: number; tasksCount: number }>> {
+  async getAllWithCounts(): Promise<Array<BusinessDomainRow & { standardsCount: number; assetsCount: number; tasksCount: number; rulesCount: number }>> {
     const domains = await all<BusinessDomainRow>('SELECT * FROM business_domains ORDER BY name');
-    const result = await Promise.all(
-      domains.map(async (domain) => {
-        const [{ standardsCount }] = await all<{ standardsCount: number }>(
-          'SELECT COUNT(*) as standardsCount FROM data_standards WHERE domain_id = ?',
-          [domain.id],
-        );
-        const [{ assetsCount }] = await all<{ assetsCount: number }>(
-          'SELECT COUNT(*) as assetsCount FROM data_assets WHERE domain_id = ?',
-          [domain.id],
-        );
-        const [{ tasksCount }] = await all<{ tasksCount: number }>(
-          'SELECT COUNT(*) as tasksCount FROM validation_tasks WHERE domain_id = ?',
-          [domain.id],
-        );
-        return { ...domain, standardsCount, assetsCount, tasksCount };
-      }),
-    );
-    return result;
+    if (domains.length === 0) return [];
+
+    // Single grouped queries instead of 4N individual COUNTs
+    const [standardsRows, assetsRows, tasksRows, rulesRows] = await Promise.all([
+      all<{ domain_id: string; cnt: number }>(
+        'SELECT domain_id, COUNT(*) as cnt FROM data_standards GROUP BY domain_id',
+      ),
+      all<{ domain_id: string; cnt: number }>(
+        'SELECT domain_id, COUNT(*) as cnt FROM data_assets GROUP BY domain_id',
+      ),
+      all<{ domain_id: string; cnt: number }>(
+        'SELECT domain_id, COUNT(*) as cnt FROM validation_tasks GROUP BY domain_id',
+      ),
+      all<{ domain_id: string; cnt: number }>(
+        `SELECT s.domain_id, COUNT(*) as cnt FROM validation_rules r
+         JOIN data_standards s ON r.standard_id = s.id
+         GROUP BY s.domain_id`,
+      ),
+    ]);
+
+    const toMap = (rows: Array<{ domain_id: string; cnt: number }>) => {
+      const m = new Map<string, number>();
+      for (const r of rows) m.set(r.domain_id, r.cnt);
+      return m;
+    };
+    const standardsMap = toMap(standardsRows);
+    const assetsMap = toMap(assetsRows);
+    const tasksMap = toMap(tasksRows);
+    const rulesMap = toMap(rulesRows);
+
+    return domains.map(d => ({
+      ...d,
+      standardsCount: standardsMap.get(d.id) || 0,
+      assetsCount: assetsMap.get(d.id) || 0,
+      tasksCount: tasksMap.get(d.id) || 0,
+      rulesCount: rulesMap.get(d.id) || 0,
+    }));
   },
 
   async getById(id: string): Promise<BusinessDomainRow | undefined> {
@@ -624,6 +646,24 @@ export async function updateRule(id: string, updates: Partial<ValidationRuleRow>
 }
 
 export async function deleteRule(id: string): Promise<void> {
+  // Remove the rule ID from all tasks' field_mappings
+  const tasks = await all<ValidationTaskRow>(
+    "SELECT id, field_mappings FROM validation_tasks WHERE field_mappings IS NOT NULL AND field_mappings != ''",
+  );
+  for (const task of tasks) {
+    try {
+      const ruleIds: string[] = JSON.parse(task.field_mappings!);
+      const filtered = ruleIds.filter(rid => rid !== id);
+      if (filtered.length !== ruleIds.length) {
+        await run(
+          "UPDATE validation_tasks SET field_mappings = ? WHERE id = ?",
+          [filtered.length > 0 ? JSON.stringify(filtered) : null, task.id],
+        );
+      }
+    } catch {
+      // skip malformed JSON
+    }
+  }
   await run('DELETE FROM validation_rules WHERE id = ?', [id]);
 }
 
@@ -644,6 +684,36 @@ export async function getRulesByDomain(domainId: string): Promise<ValidationRule
      WHERE s.domain_id = ?
      ORDER BY r.sort_order`,
     [domainId],
+  );
+}
+
+/** 获取规则池（支持按 domainId / standardId / status 过滤） */
+export async function getAllRules(filters: { domainId?: string; standardId?: string; status?: string }): Promise<Array<ValidationRuleRow & { standard_name: string; standard_display_name: string; standard_version: number }>> {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (filters.domainId) {
+    conditions.push('s.domain_id = ?');
+    params.push(filters.domainId);
+  }
+  if (filters.standardId) {
+    conditions.push('r.standard_id = ?');
+    params.push(filters.standardId);
+  }
+  if (filters.status) {
+    conditions.push('r.status = ?');
+    params.push(filters.status);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  return all(
+    `SELECT r.*, s.name as standard_name, s.display_name as standard_display_name, s.version as standard_version
+     FROM validation_rules r
+     JOIN data_standards s ON r.standard_id = s.id
+     ${whereClause}
+     ORDER BY s.name, s.version DESC, r.sort_order`,
+    params,
   );
 }
 

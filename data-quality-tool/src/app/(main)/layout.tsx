@@ -37,7 +37,6 @@ const navItems = [
   { key: '/standards', icon: <FileTextOutlined />, label: '数据标准' },
   { key: '/validation', icon: <SecurityScanOutlined />, label: '数据校验' },
   { key: '/assets', icon: <FolderOutlined />, label: '素材池' },
-  { key: '/tasks', icon: <CloudServerOutlined />, label: '任务中心' },
   { key: '/history', icon: <HistoryOutlined />, label: '历史记录' },
   { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
