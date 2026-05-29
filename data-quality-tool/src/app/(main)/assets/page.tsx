@@ -90,43 +90,63 @@ export default function AssetsPage() {
     return false;
   }
 
-  async function handleChunkUpload() {
-    if (!selectedFile || !currentDomain) return;
+  async function handleChunkUpload(resumeSessionId?: string) {
+    if (!selectedFile) {
+      message.error('请先选择文件');
+      return;
+    }
+    if (!currentDomain) {
+      message.error('请先选择业务域');
+      return;
+    }
     setUploading(true);
     abortRef.current = false;
 
     try {
-      // Step 1: Initialize upload session
-      const initRes = await fetch('/api/assets/upload/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: selectedFile.name,
-          fileSize: selectedFile.size,
-          chunkSize: CHUNK_SIZE,
-          domainId: currentDomain.id,
-        }),
-      });
-      const initJson = await initRes.json();
-      if (!initJson.success) {
-        message.error(initJson.error?.message || '初始化上传失败');
-        setUploading(false);
-        return;
-      }
-
-      const sid = initJson.data.sessionId;
-      const totalChunks = initJson.data.totalChunks;
-      setSessionId(sid);
-
-      // Check for already uploaded chunks
-      const statusRes = await fetch(`/api/assets/upload/status?sessionId=${sid}`);
-      const statusJson = await statusRes.json();
+      let sid: string;
+      let totalChunks: number;
       let uploadedChunks: number[] = [];
-      if (statusJson.success) {
-        uploadedChunks = statusJson.data.uploadedChunks || [];
+
+      if (resumeSessionId) {
+        // Resume: use existing session
+        sid = resumeSessionId;
+        const statusRes = await fetch(`/api/assets/upload/status?sessionId=${sid}`);
+        const statusJson = await statusRes.json();
+        if (statusJson.success) {
+          uploadedChunks = statusJson.data.uploadedChunks || [];
+          totalChunks = statusJson.data.totalChunks || Math.ceil(selectedFile.size / CHUNK_SIZE);
+        } else {
+          message.error('无法获取上传状态，请重新开始上传');
+          setUploading(false);
+          return;
+        }
+      } else {
+        // Step 1: Initialize new upload session
+        const initRes = await fetch('/api/assets/upload/init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: selectedFile.name,
+            fileSize: selectedFile.size,
+            chunkSize: CHUNK_SIZE,
+            domainId: currentDomain.id,
+          }),
+        });
+        const initJson = await initRes.json();
+        if (!initJson.success) {
+          message.error(initJson.error?.message || '初始化上传失败');
+          setUploading(false);
+          return;
+        }
+
+        sid = initJson.data.sessionId;
+        totalChunks = initJson.data.totalChunks;
+        setSessionId(sid);
       }
 
-      setUploadStatusText(`已恢复 ${uploadedChunks.length}/${totalChunks} 个分片`);
+      setUploadStatusText(`已上传 ${uploadedChunks.length}/${totalChunks} 个分片`);
+
+      const uploadedSet = new Set(uploadedChunks);
 
       // Step 2: Upload chunks
       for (let i = 0; i < totalChunks; i++) {
@@ -137,7 +157,7 @@ export default function AssetsPage() {
           return;
         }
 
-        if (uploadedChunks.includes(i)) {
+        if (uploadedSet.has(i)) {
           setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
           continue;
         }
@@ -208,12 +228,14 @@ export default function AssetsPage() {
   }
 
   async function handleResumeUpload() {
+    if (!sessionId) {
+      message.error('未找到上传会话，请重新开始上传');
+      return;
+    }
     setUploadPaused(false);
     setUploading(true);
-    // Re-trigger the upload from where it left off
-    // The server already tracks uploaded chunks, so we just continue
     abortRef.current = false;
-    await handleChunkUpload();
+    await handleChunkUpload(sessionId);
   }
 
   async function handleDelete(id: string) {

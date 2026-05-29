@@ -69,7 +69,17 @@ function executeCrossTableRule(
   if (!refTable || !refField || !localField) return issues;
 
   const refValues = refSets.get(`${refTable}.${refField}`);
-  if (!refValues) return issues;
+  if (!refValues) {
+    issues.push({
+      sheetName,
+      rowIndex: 1,
+      fieldName: localField,
+      originalValue: '',
+      severity: 'error',
+      issueDescription: `跨表规则引用表 ${refTable}.${refField} 未找到，规则已跳过`,
+    });
+    return issues;
+  }
 
   for (const row of chunk) {
     const val = String(row[localField] ?? '').trim();
@@ -178,17 +188,12 @@ export async function executeValidation(
       }
     }
     let total = 0;
-    for (const [_name, rows] of allSheets) {
-      const matchingRules = crossRules.filter(r => !r.tableName || allSheets.has(r.tableName!) || nameIncludesAny(allSheets, r));
+    for (const [sheetName, rows] of allSheets) {
+      const matchingRules = crossRules.filter(r => !r.tableName || sheetName.includes(r.tableName));
       if (matchingRules.length === 0) continue;
       total += chunkRows(rows, batchSize).length;
     }
     return Math.max(total, 1);
-  }
-
-  function nameIncludesAny(sheets: Map<string, unknown[]>, rule: ParsedRule): boolean {
-    if (!rule.tableName) return true;
-    return [...sheets.keys()].some(n => n.includes(rule.tableName!));
   }
 
   let completedBatches = 0;
